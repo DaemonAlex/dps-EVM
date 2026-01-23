@@ -1128,4 +1128,3 @@ AddEventHandler('vehiclemods:server:chargeRepair', function(repairType, cost)
             ('Insufficient funds. Need $%d'):format(finalCost))
     end
 end)
-
