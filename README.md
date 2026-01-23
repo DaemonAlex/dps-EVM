@@ -260,20 +260,10 @@ Provides information on:
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🆘 **Support**
-
-- **Issues**: [GitHub Issues](https://github.com/DaemonAlex/EmergencyVehicleMenu/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/DaemonAlex/EmergencyVehicleMenu/discussions)
-- **Wiki**: [Documentation Wiki](https://github.com/DaemonAlex/EmergencyVehicleMenu/wiki)
-
 ## 🌟 **Acknowledgments**
 
 - [ox_lib](https://github.com/overextended/ox_lib) - Exceptional UI and utility library
 - [oxmysql](https://github.com/overextended/oxmysql) - Reliable database connector
 - FiveM Community - Continuous feedback and support
-
 ---
-
 **Original concept and code by @daemonalex** 🚀
-
-Original concept and code by @daemonalex 🚀
