@@ -1,155 +1,230 @@
-# Emergency Vehicle Menu - Auto-Configuration Guide
+# DSRP Emergency Vehicle Menu - Bug Fixes
 
-## 🚀 Quick Start (Zero Configuration Required!)
+**Version:** 2.0.2-DSRP
+**Adapted for:** DelPerro Sands RP (QBox Framework)
+**Original Author:** DaemonAlex
+**Fixed by:** DelPerro Sands RP Development Team
 
-The script now works **completely out of the box** with automatic configuration. Just install and it will:
+---
 
-- ✅ Auto-detect your framework (ESX, QBCore, QBox, or Standalone)
-- ✅ Auto-configure modification zones at all major police/fire/medical stations
-- ✅ Auto-detect emergency vehicles using multiple methods
-- ✅ Auto-setup database tables and dependencies
+## Critical Bugs Fixed
 
-**Simply start the resource and it works!**
+### 1. QBox Framework Detection (config.lua:296-299)
 
-## ⚙️ Auto-Configuration Features
-
-### Automatic Framework Detection
-The script automatically detects and configures for:
-- **ESX** - Full job integration with police/ambulance/fire restrictions
-- **QBCore/QBX** - Complete job system support
-- **QBox** - Full compatibility
-- **Standalone** - Location-only restrictions
-
-### Automatic Zone Detection
-Pre-configured modification zones at:
-- **Police Stations**: Mission Row, Davis, Sandy Shores, Paleto Bay, Vespucci
-- **Fire Stations**: Los Santos, Davis, Paleto Bay, Sandy Shores  
-- **Hospitals**: Pillbox Hill, Sandy Shores Medical
-
-### Automatic Vehicle Detection
-Uses multiple methods to detect emergency vehicles:
-1. Vehicle Class 18 (Emergency) - Most reliable
-2. Emergency light detection
-3. Common emergency vehicle model names
-4. Expandable for custom vehicles
-
-## 🎛️ Manual Override Options
-
-Want custom settings? You can override any auto-configuration:
-
-### Framework Override
+**Problem:**
 ```lua
-Config.ManualFramework = true
-Config.Framework = 'esx' -- Force specific framework
+elseif GetResourceState('qb-core') == 'started' or GetResourceState('qbx_core') == 'started' then
+    return 'qbcore'
+elseif GetResourceState('qbox-core') == 'started' or GetResourceState('qbx-core') == 'started' then
+    return 'qbox'
 ```
 
-### Zone Override
+- QBox uses `qbx_core` as resource name
+- Was being detected as `qbcore` first (line 296)
+- Never reached QBox detection (line 298)
+- Also checked for wrong resource names (`qbox-core` and `qbx-core` which don't exist)
+
+**Fix:**
+```lua
+-- Check for QBox FIRST (it uses qbx_core but is different from QBX/QB-Core)
+elseif GetResourceState('qbx_core') == 'started' then
+    -- QBox uses qbx_core resource name
+    return 'qbox'
+elseif GetResourceState('qb-core') == 'started' then
+    -- Legacy QB-Core
+    return 'qbcore'
+```
+
+**Result:** QBox now correctly detected before QB-Core
+
+---
+
+### 2. QBox Player Export (config.lua:371)
+
+**Problem:**
+```lua
+elseif framework == 'qbox' then
+    local Player = exports.qbox:GetPlayer(playerId)  -- WRONG!
+```
+
+- Used non-existent `exports.qbox`
+- QBox resource is named `qbx_core`, not `qbox`
+- Would throw errors: "No such export GetPlayer in resource qbox"
+
+**Fix:**
+```lua
+elseif framework == 'qbox' then
+    -- QBox uses qbx_core resource with GetPlayer export
+    local Player = exports.qbx_core:GetPlayer(playerId)
+```
+
+**Result:** Job permission checking now works correctly with QBox
+
+---
+
+### 3. QBox Server Framework Object (server.lua:38)
+
+**Problem:**
+```lua
+elseif currentFramework == 'qbox' then
+    -- QBox uses exports directly
+    frameworkObject = exports.qbox  -- WRONG!
+```
+
+- Same issue as #2 - wrong export name
+- Would cause all server-side QBox calls to fail
+
+**Fix:**
+```lua
+elseif currentFramework == 'qbox' then
+    -- QBox uses qbx_core resource
+    frameworkObject = exports.qbx_core
+```
+
+**Result:** Server-side framework integration now works
+
+---
+
+## Technical Details
+
+### Why QBox Detection Failed
+
+1. **Resource Name Confusion:**
+   - QB-Core uses: `qb-core`
+   - QBX (QB-Core extended) uses: `qbx_core`
+   - **QBox (new framework) also uses: `qbx_core`**
+
+2. **Detection Order Issue:**
+   - Original script checked for `qbx_core` and assumed QB-Core
+   - QBox was checked second, but for wrong resource names
+   - QBox servers would be detected as QB-Core
+
+3. **Export Name Confusion:**
+   - Script assumed QBox used `exports.qbox`
+   - Actual QBox export is `exports.qbx_core`
+
+### The Fix
+
+**Priority-based detection:**
+1. Check for ESX first (`es_extended`)
+2. Check for **QBox second** (`qbx_core`) - **This is the key change**
+3. Check for QB-Core third (`qb-core`)
+4. Default to standalone
+
+This ensures QBox servers are correctly identified before falling back to QB-Core detection.
+
+---
+
+## What Still Works
+
+All original features are intact:
+
+✅ **Multi-framework support** (ESX, QBCore, QBox, Standalone)
+✅ **Auto-configuration system**
+✅ **Job-based access control**
+✅ **Grade restrictions** (Grade 4+ by default)
+✅ **11+ pre-configured locations**
+✅ **Custom livery support**
+✅ **Vehicle modification system**
+✅ **Performance upgrades**
+✅ **Database integration**
+✅ **Smart caching**
+
+---
+
+## Installation for DSRP
+
+1. **Copy** `dsrp-emergencymenu` to resources folder
+2. **Add to server.cfg:**
+   ```cfg
+   ensure ox_lib
+   ensure oxmysql
+   ensure qbx_core
+   ensure dsrp-emergencymenu
+   ```
+3. **Restart server** - Auto-configuration handles the rest
+
+---
+
+## Configuration
+
+### Job Requirements (config.lua)
+
+Default settings work for DSRP:
+- **Police:** Grade 4+ (Officer level)
+- **Fire:** Grade 4+ (Firefighter level)
+- **Ambulance:** Grade 4+ (EMS level)
+
+### Custom Zones
+
+To add your own zones:
 ```lua
 Config.ManualZones = true
 Config.ManualModificationZones = {
     {
-        name = "My Custom Police Station",
-        coords = vector3(100.0, 200.0, 30.0),
-        radius = 25.0,
-        type = "police"
+        name = "Custom Police Garage",
+        coords = vector3(x, y, z),
+        radius = 4.0,
+        type = "police",
+        requiredJob = "police",
+        minGrade = 6,  -- Custom grade requirement
+        jobLabel = "Sergeant"
     }
 }
 ```
 
-### Vehicle Detection Override
+---
+
+## Debugging
+
+Enable debug mode in `config.lua`:
 ```lua
-Config.ManualVehicleDetection = true
-Config.ManualEmergencyVehicles = {
-    "ambulance", "firetruk", "police", -- Standard vehicles
-    "my_custom_police_car", -- Your custom vehicles
-    "my_custom_ambulance"
-}
+Config.Debug = true
 ```
 
-### Feature Toggles
-```lua
-Config.EnabledModifications = {
-    Liveries = true,            -- Standard liveries
-    CustomLiveries = true,      -- Custom YFT liveries
-    Performance = true,         -- Engine, brakes, transmission
-    Appearance = true,          -- Colors, wheels, tint
-    Neon = false,               -- Neon lights (disabled for performance)
-    Extras = true,              -- Vehicle extras
-    Doors = true                -- Door controls
-}
-
-Config.ShowBlips = true         -- Map blips for zones
-Config.ShowMarkers = true       -- Ground markers
-Config.EmergencyVehiclesOnly = true  -- Emergency vehicles only
+You'll see console output like:
+```
+[AUTO-CONFIG]: Framework auto-configured as: qbox
+INFO: QBox framework initialized on server
+[AUTO-CONFIG]: Configured 11 modification zones
 ```
 
-## 🔧 Advanced Configuration
+If you see `qbcore` instead of `qbox`, the detection fix didn't work - check resource order in server.cfg.
 
-### Disable Auto-Configuration Entirely
-```lua
-Config.AutoConfigure = false
--- Then manually configure everything below
-```
+---
 
-### Selective Auto-Configuration
-```lua
-Config.AutoDetectFramework = true   -- Auto-detect framework
-Config.AutoDetectZones = false      -- Use manual zones
-Config.AutoDetectVehicles = true    -- Auto-detect vehicles
-```
+## Credits
 
-### Debug Mode
-```lua
-Config.Debug = true  -- Enable detailed logging
-```
+- **Original Script:** DaemonAlex - Emergency Vehicle Menu v2.0.1
+- **Bug Fixes:** DelPerro Sands RP Development Team
+- **Framework:** QBox (qbx_core)
+- **Libraries:** ox_lib, oxmysql
 
-## 📋 Configuration Priority
+---
 
-The script uses this priority order:
+## Changelog
 
-1. **Manual Overrides** (if enabled) - Highest priority
-2. **Auto-Configuration** - Default behavior  
-3. **Validation Fallbacks** - Safety nets if something fails
+### v2.0.2-DSRP (DSRP Fixes)
+- 🐛 Fixed QBox framework detection order
+- 🐛 Fixed QBox player export calls (`exports.qbox` → `exports.qbx_core`)
+- 🐛 Fixed server framework object initialization for QBox
+- 📝 Updated fxmanifest metadata for DSRP
+- 📖 Added comprehensive fix documentation
 
-## 🛠️ Troubleshooting
+### v2.0.1 (Original)
+- Zone optimization and performance updates
+- Reduced zone sizes to 4m
+- Fixed notification spam
+- Repositioned zones to parking areas
 
-### Script Not Working?
-1. Check console for auto-config messages
-2. Enable debug mode: `Config.Debug = true`
-3. Verify dependencies (ox_lib, oxmysql) are started first
+---
 
-### No Zones Available?
-Auto-config will create a default zone at Mission Row PD if none are found.
+## Support
 
-### Framework Not Detected?
-The script will default to standalone mode and work with location-only restrictions.
+For DSRP-specific issues:
+- Check `Config.Debug = true` output
+- Verify `qbx_core` is loaded before this resource
+- Ensure you're running QBox framework (not QB-Core or QBX)
 
-### Custom Vehicles Not Detected?
-Either add them to `Config.ManualEmergencyVehicles` or ensure they have Vehicle Class 18.
-
-## 📝 Migration from Old Config
-
-If upgrading from an older version:
-
-1. **Backup your old config.lua**
-2. **Replace with new auto-config version**  
-3. **Add any custom zones/vehicles to manual override sections**
-4. **Test thoroughly**
-
-The new system is designed to work better than manual configuration while still allowing full customization when needed.
-
-## 🎯 Best Practices
-
-- **Leave auto-config enabled** for easiest maintenance
-- **Only use manual overrides** when you need specific customization  
-- **Enable debug mode** during setup to see what's being configured
-- **Test with different frameworks** if you switch between them
-- **Keep manual vehicle lists updated** when adding new emergency vehicles
-
-## 📞 Support
-
-If auto-configuration isn't working for your setup:
-1. Enable debug mode and check console output
-2. Verify all dependencies are properly installed
-3. Check that framework resources start before this script
-4. Report issues with full debug output
+Original script issues:
+- [GitHub Issues](https://github.com/DaemonAlex/EmergencyVehicleMenu/issues)
