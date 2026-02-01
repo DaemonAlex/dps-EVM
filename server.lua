@@ -133,7 +133,7 @@ CreateThread(function()
         print("^2INFO:^0 QBCore framework initialized on server")
     elseif currentFramework == 'qbox' then
         -- QBox uses qbx_core resource
-        frameworkObject = exports.qbx_core
+        frameworkObject = exports['qbx_core']:GetCoreObject()
         print("^2INFO:^0 QBox framework initialized on server")
     else
         print("^2INFO:^0 Running in standalone mode")
@@ -593,7 +593,7 @@ local function GetPlayerIdentifier(playerId)
         local Player = frameworkObject.Functions.GetPlayer(playerId)
         return Player and Player.PlayerData.citizenid or nil
     elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.GetPlayer(playerId)
+        local Player = frameworkObject.Functions.GetPlayer(playerId)
         return Player and Player.PlayerData.citizenid or nil
     end
     return 'player_' .. tostring(playerId) -- Fallback for standalone
@@ -612,7 +612,7 @@ local function GetPlayerJob(playerId)
             return Player.PlayerData.job.name, Player.PlayerData.job.grade.level
         end
     elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.GetPlayer(playerId)
+        local Player = frameworkObject.Functions.GetPlayer(playerId)
         if Player then
             return Player.PlayerData.job.name, Player.PlayerData.job.grade.level
         end
@@ -985,7 +985,7 @@ local function GetPlayerMoney(playerId, moneyType)
             end
         end
     elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.GetPlayer(playerId)
+        local Player = frameworkObject.Functions.GetPlayer(playerId)
         if Player then
             if moneyType == 'bank' then
                 return Player.PlayerData.money.bank
@@ -1016,7 +1016,7 @@ local function RemoveMoney(playerId, amount, moneyType)
             return true
         end
     elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.GetPlayer(playerId)
+        local Player = frameworkObject.Functions.GetPlayer(playerId)
         if Player then
             Player.Functions.RemoveMoney(moneyType, amount, 'vehicle-repair')
             return true
@@ -1128,3 +1128,4 @@ AddEventHandler('vehiclemods:server:chargeRepair', function(repairType, cost)
             ('Insufficient funds. Need $%d'):format(finalCost))
     end
 end)
+
