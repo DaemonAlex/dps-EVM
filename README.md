@@ -266,4 +266,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [oxmysql](https://github.com/overextended/oxmysql) - Reliable database connector
 - FiveM Community - Continuous feedback and support
 ---
-**Original concept and code by @daemonalex** 🚀
+**Original concept and code by @daemonalex** 🚀 **Documentation by Claude Code"
