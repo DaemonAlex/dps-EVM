@@ -22,7 +22,7 @@ AddEventHandler('onClientResourceStart', function(resourceName)
         if GetResourceState('qb-core') == 'started' then
             QBCore = exports['qb-core']:GetCoreObject()
         elseif GetResourceState('qbx_core') == 'started' then
-            QBCore = exports['qbx_core']:GetCoreObject()
+            QBCore = exports['qb-core']:GetCoreObject()
         end
         print("^2INFO:^0 QBCore initialized")
     elseif framework == 'qbox' then

@@ -1,28 +1,207 @@
 Config = {}
 
--- Auto-Configuration Settings
-Config.Debug = true
-Config.AutoConfigure = true -- Automatically configure everything
-Config.AutoDetectFramework = true -- Automatically detect framework if available
-Config.AutoDetectZones = true -- Automatically detect modification zones
-Config.AutoDetectVehicles = true -- Automatically detect emergency vehicles
+-----------------------------------------------------------
+-- [[ 1. CORE SETTINGS ]]
+-----------------------------------------------------------
+Config.Debug = true                   -- Keep TRUE while setting up. Set FALSE for production.
+Config.CheckUpdates = true            -- Check for script updates on startup
+Config.AutoConfigure = true           -- Auto-configure framework, zones, vehicles
 
--- Manual Override Settings (set to false to disable auto-config for that feature)
-Config.ManualFramework = false -- Set to true to use manual framework setting below
-Config.ManualZones = false -- Set to true to use manual zones below
-Config.ManualVehicleDetection = false -- Set to true to use manual vehicle list below
-Config.ManualJobSystem = false -- Set to true to disable auto job detection
+-----------------------------------------------------------
+-- [[ 2. FRAMEWORK & PERFORMANCE ]]
+-----------------------------------------------------------
+Config.AutoDetectFramework = true     -- Let script detect ESX/QBCore/QBox
+Config.Framework = 'qbox'               -- Keep nil for auto-detect, or set 'esx'/'qbcore'/'qbox'/'standalone'
 
--- Advanced Job-Based Access Control
-Config.EnableJobRestrictions = false -- Enable job-based location restrictions (DISABLED for admin use)
-Config.EnableGradeRestrictions = false -- Enable grade/level restrictions (DISABLED for admin use)
-Config.DisableZoneRestrictions = true -- Bypass zone location checks entirely (ENABLED for admin use anywhere)
-Config.AutoDetectJobTables = true -- Auto-detect framework job database tables
-Config.CacheJobInfo = true -- Cache job information for performance
-Config.JobCacheTimeout = 300000 -- 5 minutes in milliseconds
+-- Performance: Job caching prevents SQL spam
+Config.CacheJobInfo = true            -- Cache job info instead of checking DB every time
+Config.JobCacheTimeout = 300000       -- 5 minutes cache duration (ms)
 
--- Framework Detection and Compatibility (auto-configured unless ManualFramework = true)
-Config.Framework = 'standalone' -- Only used if ManualFramework = true
+-----------------------------------------------------------
+-- [[ 3. JOB ACCESS CONTROL ]]
+-----------------------------------------------------------
+Config.EnableJobRestrictions = false   -- Enable job-based zone restrictions
+Config.EnableGradeRestrictions = false -- Enable grade/rank requirements
+Config.DisableZoneRestrictions = true -- Set TRUE to bypass all zone checks (admin testing)
+
+-- Job name mappings (add your custom job names here)
+Config.JobMappings = {
+    police = {'police', 'lspd', 'bcso', 'sheriff', 'sahp', 'saspr', 'statepolice', 'trooper'},
+    fire = {'fire', 'lsfd', 'firefighter'},
+    ambulance = {'ambulance', 'ems', 'medical'},
+    mechanic = {'mechanic', 'lscustoms', 'bennys'}
+}
+
+-----------------------------------------------------------
+-- [[ 4. ZONE CONFIGURATION ]]
+-----------------------------------------------------------
+Config.ManualZones = false             -- Use manual zone definitions below
+Config.AutoDetectZones = false        -- Disable auto-zone detection when using manual
+
+-- Manual modification zones with Grade 0 access (ALL ranks can use)
+Config.ManualModificationZones = {
+    -- Police Stations
+    {
+        name = "Mission Row PD - Garage",
+        coords = vector3(454.6, -1017.4, 28.4),
+        radius = 30.0,
+        type = "police",
+        requiredJob = "police",
+        minGrade = 0,                 -- Grade 0 = Cadets/Officers can access
+        jobLabel = "Police Officer"
+    },
+    {
+        name = "Sandy Shores Sheriff - Parking",
+        coords = vector3(1855.9, 3683.5, 33.7),
+        radius = 20.0,
+        type = "police",
+        requiredJob = "police",
+        minGrade = 0,
+        jobLabel = "Sheriff Deputy"
+    },
+    {
+        name = "Paleto Bay Sheriff - Garage",
+        coords = vector3(-456.3, 6008.4, 31.3),
+        radius = 20.0,
+        type = "police",
+        requiredJob = "police",
+        minGrade = 0,
+        jobLabel = "Sheriff Deputy"
+    },
+    {
+        name = "Davis Sheriff Station - Lot",
+        coords = vector3(379.9, -1600.5, 29.3),
+        radius = 20.0,
+        type = "police",
+        requiredJob = "police",
+        minGrade = 0,
+        jobLabel = "Police Officer"
+    },
+    {
+        name = "Vespucci PD - Garage",
+        coords = vector3(-1088.6, -834.7, 37.7),
+        radius = 20.0,
+        type = "police",
+        requiredJob = "police",
+        minGrade = 0,
+        jobLabel = "Police Officer"
+    },
+
+    -- Fire Stations
+    {
+        name = "Los Santos Fire Station 1",
+        coords = vector3(1193.8, -1464.8, 34.9),
+        radius = 20.0,
+        type = "fire",
+        requiredJob = "fire",
+        minGrade = 0,
+        jobLabel = "Firefighter"
+    },
+    {
+        name = "Davis Fire Station",
+        coords = vector3(213.7, -1644.2, 29.8),
+        radius = 20.0,
+        type = "fire",
+        requiredJob = "fire",
+        minGrade = 0,
+        jobLabel = "Firefighter"
+    },
+    {
+        name = "Paleto Bay Fire Station",
+        coords = vector3(-367.2, 6123.4, 31.5),
+        radius = 20.0,
+        type = "fire",
+        requiredJob = "fire",
+        minGrade = 0,
+        jobLabel = "Firefighter"
+    },
+    {
+        name = "Sandy Shores Fire Station",
+        coords = vector3(1691.5, 3581.2, 35.6),
+        radius = 20.0,
+        type = "fire",
+        requiredJob = "fire",
+        minGrade = 0,
+        jobLabel = "Firefighter"
+    },
+
+    -- Medical/EMS
+    {
+        name = "Pillbox Hill Medical Center",
+        coords = vector3(338.5, -580.3, 28.8),
+        radius = 25.0,
+        type = "medical",
+        requiredJob = "ambulance",
+        minGrade = 0,
+        jobLabel = "EMS Personnel"
+    },
+    {
+        name = "Sandy Shores Medical Center",
+        coords = vector3(1835.2, 3678.9, 34.3),
+        radius = 20.0,
+        type = "medical",
+        requiredJob = "ambulance",
+        minGrade = 0,
+        jobLabel = "EMS Personnel"
+    },
+
+    -- Custom MLO Examples (Gabz-style) - Uncomment and adjust coords as needed
+    -- {
+    --     name = "Gabz MRPD - Main Garage",
+    --     coords = vector3(441.5, -981.0, 30.7),
+    --     radius = 15.0,
+    --     type = "police",
+    --     requiredJob = "police",
+    --     minGrade = 0,
+    --     jobLabel = "Police Officer"
+    -- },
+    -- {
+    --     name = "Gabz Pillbox - Ambulance Bay",
+    --     coords = vector3(311.2, -595.5, 43.3),
+    --     radius = 12.0,
+    --     type = "medical",
+    --     requiredJob = "ambulance",
+    --     minGrade = 0,
+    --     jobLabel = "EMS Personnel"
+    -- },
+}
+
+-----------------------------------------------------------
+-- [[ 5. VEHICLE DETECTION ]]
+-----------------------------------------------------------
+-- Auto-detect often fails on custom add-on vehicles. Use manual list.
+Config.ManualVehicleDetection = false
+Config.AutoDetectVehicles = true
+
+-- List ALL your emergency vehicle spawn codes here
+Config.ManualEmergencyVehicles = {
+    -- GTA V Default Emergency Vehicles
+    "police", "police2", "police3", "police4", "policeb", "policet",
+    "sheriff", "sheriff2", "riot", "riot2",
+    "fbi", "fbi2", "pranger", "lguard",
+    "firetruk", "ambulance",
+    "polmav", "predator",
+
+    -- Common Custom Police Vehicles (add your server's vehicles)
+    -- "nypd_explorer",
+    -- "bcso_charger",
+    -- "2020tahoe",
+    -- "lapd_cvpi",
+    -- "sahp_charger",
+    -- "unmarked_charger",
+    -- "slicktop_explorer",
+
+    -- Common Custom Fire/EMS Vehicles
+    -- "lafd_engine",
+    -- "lafd_ladder",
+    -- "ems_sprinter",
+    -- "rescue_suburban",
+
+    -- Helicopters (work if landed in zone)
+    -- "as350",
+    -- "polmav_fib",
+    -- "medevac",
+}
 
 -- Auto-configured framework-specific settings
 Config.FrameworkSettings = {}
@@ -247,21 +426,34 @@ function Config.AutoConfigureZones()
 end
 
 
--- Available modification types - auto-configured but can be manually overridden
+-----------------------------------------------------------
+-- [[ 6. FEATURE TOGGLES ]]
+-----------------------------------------------------------
 Config.EnabledModifications = {
     Liveries = true,            -- Standard vehicle liveries
-    CustomLiveries = true,      -- Custom YFT liveries  
+    CustomLiveries = true,      -- Custom YFT liveries
     Performance = true,         -- Engine, brakes, transmission, etc.
     Appearance = true,          -- Colors, wheels, window tint
-    Neon = false,               -- Neon lights and colors (disabled by default for performance)
-    Extras = true,              -- Vehicle extras toggle
-    Doors = true                -- Door controls
+    Neon = false,               -- Neon lights (enable for unmarked/undercover units)
+    Extras = true,              -- Vehicle extras toggle (lightbars, pushbars, etc.)
+    Doors = true,               -- Door controls
+    Repair = true               -- Vehicle repair functionality
 }
 
--- Other auto-configured settings (can be manually overridden)
-Config.ShowBlips = false        -- Show modification zone blips on map (disabled for invisible zones)
-Config.ShowMarkers = false      -- Show ground markers at zones (disabled for invisible zones)
-Config.EmergencyVehiclesOnly = false  -- Allow any vehicle (DISABLED for admin testing)
+-- Selective neon for undercover/unmarked vehicles
+Config.UndercoverNeon = {
+    enabled = false,            -- Set TRUE to allow neon on specific vehicles only
+    allowedVehicles = {         -- Vehicle spawn codes that CAN have neon
+        -- "unmarked_charger",
+        -- "undercover_taurus",
+        -- "slicktop_explorer",
+    }
+}
+
+-- Other display settings
+Config.ShowBlips = false        -- Show modification zone blips on map
+Config.ShowMarkers = false      -- Show ground markers at zones
+Config.EmergencyVehiclesOnly = false  -- Only allow emergency vehicles (set FALSE for testing)
 
 -----------------------------------------------------------
 -- THIRD-PARTY SCRIPT COMPATIBILITY (v2.1.2+)
@@ -298,6 +490,7 @@ Config.DynamicMarkers = {
     enabled = false,                   -- Enable dynamic markers (overrides ShowMarkers)
     markerType = 1,                    -- Marker type (1 = cylinder, 27 = arrow)
     size = vector3(3.0, 3.0, 1.0),     -- Marker size
+    -- Uses Config.Constants.MARKER_FADE_START and MARKER_FADE_END if available
     fadeStartDistance = 30.0,          -- Distance where marker starts appearing
     fadeEndDistance = 5.0,             -- Distance where marker is fully visible
     bobUpDown = false,                 -- Marker bobs up and down
@@ -311,22 +504,33 @@ Config.DynamicMarkers = {
 }
 
 -----------------------------------------------------------
--- REPAIR COST SYSTEM (v2.1.1+)
+-- [[ 7. ECONOMY / REPAIR COSTS ]]
 -- Charge for repairs to integrate with server economy
+-- Set high to encourage using actual mechanic players
 -----------------------------------------------------------
 Config.RepairCosts = {
-    enabled = false,                   -- Enable repair costs
+    enabled = true,                    -- Enable repair costs
     chargeFrom = 'bank',               -- 'bank', 'cash', or 'both' (tries bank first)
-    fullRepairCost = 500,              -- Base cost for full repair
-    emergencyRepairCost = 150,         -- Cost for emergency repair
-    fieldRepairCost = 250,             -- Cost for field repair (item still required)
+    currency = 'money',                -- Alternative: use 'money' for cash
+
+    -- Cost structure (balanced for economy)
+    fullRepairCost = 500,              -- Full repair at station
+    emergencyRepairCost = 200,         -- Quick patch-up
+    fieldRepairCost = 350,             -- Field repair (higher to encourage station use)
+
+    -- Scaling
     scaleCostByDamage = true,          -- More damage = higher cost
-    maxCostMultiplier = 3.0,           -- Max multiplier for heavily damaged vehicles
-    freeForJobs = {                    -- Jobs that get free repairs
-        -- 'mechanic'                  -- Uncomment to enable
+    maxCostMultiplier = 2.5,           -- Cap at 2.5x base cost
+
+    -- Job-based pricing
+    freeForJobs = {
+        'mechanic',                    -- Mechanics repair free
+        'lscustoms'
     },
-    discountJobs = {                   -- Jobs that get discounted repairs
-        -- {job = 'police', discount = 0.5}  -- 50% off
+    discountJobs = {
+        {job = 'police', discount = 0.25},    -- 25% off for police
+        {job = 'ambulance', discount = 0.25}, -- 25% off for EMS
+        {job = 'fire', discount = 0.25}       -- 25% off for fire
     }
 }
 
@@ -380,10 +584,10 @@ Config.FieldRepair = {
         'police', 'ambulance', 'fire', 'mechanic', 'lspd', 'bcso', 'sahp', 'ems', 'lsfd'
     },
     minGrade = 0,                      -- Minimum job grade (0 = any grade)
-    maxEngineRepair = 350.0,           -- Max engine health from field repair (350/1000)
-    cooldown = 300000,                 -- 5 minute cooldown between field repairs
+    maxEngineRepair = 350.0,           -- Max engine health from field repair (see Constants.ENGINE_MAX_FIELD_REPAIR)
+    cooldown = 300000,                 -- 5 min cooldown (see Constants.COOLDOWN_FIELD_REPAIR)
     consumeItem = true,                -- Remove item after use
-    repairTime = 15000                 -- Time in ms for field repair
+    repairTime = 15000                 -- Time in ms for field repair animation
 }
 
 -----------------------------------------------------------
@@ -426,16 +630,76 @@ Config.CustomLiveries = {
     -- Add more vehicles and liveries as needed
 }
 
--- Manual Zone Configuration (only used if ManualZones = true)
-Config.ManualModificationZones = {
-    -- Add your custom zones here if you want manual control
-    -- Example:
-    -- {
-    --     name = "Custom Police Station",
-    --     coords = vector3(0.0, 0.0, 0.0),
-    --     radius = 25.0,
-    --     type = "police"
-    -- }
+-----------------------------------------------------------
+-- [[ 8. INPUT VALIDATION ]]
+-- Prevent invalid/malicious input for presets and liveries
+-----------------------------------------------------------
+Config.InputValidation = {
+    maxNameLength = 32,                -- Max characters for preset/livery names
+    minNameLength = 1,                 -- Min characters
+    allowedCharacters = "^[%w%s%-_]+$", -- Alphanumeric, spaces, hyphens, underscores only
+    sanitizeNames = true,              -- Auto-sanitize input
+    blockSpecialChars = true           -- Block SQL injection characters
+}
+
+-- Validate preset/livery name
+function Config.ValidateName(name)
+    if not name or type(name) ~= "string" then
+        return false, "Invalid name format"
+    end
+
+    local trimmed = name:match("^%s*(.-)%s*$")
+    if not trimmed or trimmed == "" then
+        return false, "Name cannot be empty"
+    end
+
+    if #trimmed < Config.InputValidation.minNameLength then
+        return false, "Name too short"
+    end
+
+    if #trimmed > Config.InputValidation.maxNameLength then
+        return false, "Name too long (max " .. Config.InputValidation.maxNameLength .. " characters)"
+    end
+
+    if Config.InputValidation.blockSpecialChars then
+        if not trimmed:match(Config.InputValidation.allowedCharacters) then
+            return false, "Name contains invalid characters"
+        end
+    end
+
+    return true, trimmed
+end
+
+-----------------------------------------------------------
+-- [[ 9. NAMED CONSTANTS ]]
+-- Replace magic numbers for better maintainability
+-----------------------------------------------------------
+Config.Constants = {
+    -- Vehicle classes
+    VEHICLE_CLASS_EMERGENCY = 18,
+
+    -- Damage thresholds
+    DAMAGE_MINOR = 750,               -- Above this = minor damage
+    DAMAGE_MODERATE = 500,            -- Above this = moderate damage
+    DAMAGE_SEVERE = 250,              -- Above this = severe damage
+    DAMAGE_CRITICAL = 100,            -- Above this = critical damage
+
+    -- Engine health
+    ENGINE_HEALTHY = 1000,
+    ENGINE_MAX_FIELD_REPAIR = 350,
+
+    -- Cooldowns (ms)
+    COOLDOWN_FIELD_REPAIR = 300000,   -- 5 minutes
+    COOLDOWN_MENU_REOPEN = 500,       -- 500ms anti-spam
+
+    -- Distances
+    ZONE_CHECK_INTERVAL = 1000,       -- Check zone every 1 second
+    MARKER_FADE_START = 30.0,
+    MARKER_FADE_END = 5.0,
+
+    -- Cache durations
+    CACHE_JOB_DURATION = 300000,      -- 5 minutes
+    CACHE_VEHICLE_DURATION = 60000,   -- 1 minute
 }
 
 -- Framework Detection
@@ -799,19 +1063,10 @@ function Config.IsEmergencyVehicle(vehicle)
     return IsVehicleEmergency(vehicle)
 end
 
--- Manual Emergency Vehicle List (only used if ManualVehicleDetection = true)
-Config.ManualEmergencyVehicles = {
-    -- Add your custom emergency vehicles here if you want manual control
-    "ambulance", "firetruk", "police", "police2", "police3", "police4",
-    "policeb", "policet", "sheriff", "sheriff2", "fbi", "fbi2", "riot",
-    "lguard", "pranger", "polmav", "predator", "riot2"
-    -- Add custom vehicle models here
-}
-
 -- Auto-detect emergency vehicles or use manual list
 function IsVehicleEmergency(vehicle)
     if Config.ManualVehicleDetection then
-        -- Use manual vehicle list
+        -- Use manual vehicle list (defined at top of config)
         for _, model in ipairs(Config.ManualEmergencyVehicles) do
             if IsVehicleModel(vehicle, GetHashKey(model)) then
                 return true
@@ -820,30 +1075,19 @@ function IsVehicleEmergency(vehicle)
         return false
     else
         -- Auto-detection mode
-        -- Check emergency vehicle class (18) - most reliable
-        if GetVehicleClass(vehicle) == 18 then
+        -- Check emergency vehicle class using named constant
+        local emergencyClass = Config.Constants and Config.Constants.VEHICLE_CLASS_EMERGENCY or 18
+        if GetVehicleClass(vehicle) == emergencyClass then
             return true
         end
-        
-        -- Check if vehicle has emergency lights (some servers may have this native)
-        -- Commented out as this native may not be available on all servers
-        -- if GetVehicleHasKstock and GetVehicleHasKstock(vehicle) then
-        --     return true
-        -- end
-        
-        -- Check common emergency vehicle models as fallback
-        local commonModels = {
-            "ambulance", "firetruk", "police", "police2", "police3", "police4",
-            "policeb", "policet", "sheriff", "sheriff2", "fbi", "fbi2", "riot",
-            "lguard", "pranger", "polmav", "predator", "riot2"
-        }
-        
-        for _, model in ipairs(commonModels) do
+
+        -- Fallback: Check vehicles from manual list even in auto mode
+        for _, model in ipairs(Config.ManualEmergencyVehicles) do
             if IsVehicleModel(vehicle, GetHashKey(model)) then
                 return true
             end
         end
-        
+
         return false
     end
 end

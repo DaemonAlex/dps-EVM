@@ -127,13 +127,13 @@ CreateThread(function()
         if GetResourceState('qb-core') == 'started' then
             QBCore = exports['qb-core']:GetCoreObject()
         elseif GetResourceState('qbx_core') == 'started' then
-            QBCore = exports['qbx_core']:GetCoreObject()
+            QBCore = exports['qb-core']:GetCoreObject()
         end
         frameworkObject = QBCore
         print("^2INFO:^0 QBCore framework initialized on server")
     elseif currentFramework == 'qbox' then
-        -- QBox uses qbx_core resource
-        frameworkObject = exports['qbx_core']:GetCoreObject()
+        -- QBox provides QBCore compat through qb-core bridge
+        frameworkObject = exports['qb-core']:GetCoreObject()
         print("^2INFO:^0 QBox framework initialized on server")
     else
         print("^2INFO:^0 Running in standalone mode")
