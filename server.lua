@@ -18,7 +18,7 @@ local frameworkObject = nil
 -- Only notifies admins via ACE permissions
 -----------------------------------------------------------
 local currentVersion = GetResourceMetadata(GetCurrentResourceName(), 'version', 0)
-local githubRepo = "DaemonAlex/EmergencyVehicleMenu"
+local githubRepo = "DaemonAlex/dps-EVM"
 local updateAvailable = false
 local latestVersionCached = nil
 
