@@ -98,9 +98,11 @@ local function NotifyAdminOfUpdate(playerId)
     end)
 end
 
--- Check version on resource start
+-- Check version on resource start (private DSRP fork: disabled by default via
+-- Config.CheckUpdates. Kept non-fatal/quiet — only runs when explicitly enabled.)
 AddEventHandler('onResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
+    if Config.CheckUpdates == false then return end
     CheckVersion()
 end)
 
@@ -132,9 +134,11 @@ CreateThread(function()
         frameworkObject = QBCore
         print("^2INFO:^0 QBCore framework initialized on server")
     elseif currentFramework == 'qbox' then
-        -- QBox provides QBCore compat through qb-core bridge
-        frameworkObject = exports['qb-core']:GetCoreObject()
-        print("^2INFO:^0 QBox framework initialized on server")
+        -- QBox (pure Qbox): NO GetCoreObject on this build (it throws for both
+        -- qb-core and qbx_core). Use discrete exports.qbx_core:GetPlayer(src)
+        -- everywhere instead. Leave frameworkObject nil for qbox.
+        frameworkObject = nil
+        print("^2INFO:^0 QBox framework initialized on server (discrete qbx_core exports)")
     else
         print("^2INFO:^0 Running in standalone mode")
     end
@@ -255,6 +259,111 @@ function SetupJobChangeListeners(framework)
     print("^2[JOB-CACHE]:^0 Event-driven job cache invalidation active")
 end
 
+-----------------------------------------------------------
+-- SERVER-SIDE AUTHORIZATION (DSRP security hardening)
+-- Core defect fix: all authorization was client-side only.
+-- Every menu-open and state-mutating net event now passes
+-- through these SERVER-authoritative checks. Job is read via
+-- discrete qbx_core exports; zone distance is recomputed from
+-- the player's real server-side ped coords (no client input).
+-----------------------------------------------------------
+
+-- Resolve a player's job name via discrete framework access (no GetCoreObject)
+local function GetAuthJobName(src)
+    if currentFramework == 'qbox' then
+        local Player = exports.qbx_core:GetPlayer(src)
+        return Player and Player.PlayerData and Player.PlayerData.job and Player.PlayerData.job.name or nil
+    elseif currentFramework == 'esx' and frameworkObject then
+        local xPlayer = frameworkObject.GetPlayerFromId(src)
+        return xPlayer and xPlayer.job and xPlayer.job.name or nil
+    elseif currentFramework == 'qbcore' and frameworkObject then
+        local Player = frameworkObject.Functions.GetPlayer(src)
+        return Player and Player.PlayerData and Player.PlayerData.job and Player.PlayerData.job.name or nil
+    end
+    return nil
+end
+
+-- Build the set of authorized emergency job names from config mappings
+-- (police + fire + ambulance groups; custom names like lspd/bcso included)
+local function GetEmergencyJobSet()
+    local set = {}
+    for _, group in ipairs({'police', 'fire', 'ambulance'}) do
+        local names = Config.JobMappings and Config.JobMappings[group]
+        if names then
+            for _, n in ipairs(names) do set[n] = true end
+        end
+    end
+    return set
+end
+
+-- Is this player employed in an authorized emergency job?
+local function IsPlayerAuthorized(src)
+    if not Config.EnableJobRestrictions then return true end
+    local jobName = GetAuthJobName(src)
+    if not jobName then return false end
+    return GetEmergencyJobSet()[jobName] == true
+end
+
+-- Server-authoritative zone check using the player's REAL ped coords
+local function IsPlayerInModZone(src)
+    if Config.DisableZoneRestrictions then return true end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return false end
+    local coords = GetEntityCoords(ped)
+    for _, zone in ipairs(Config.ModificationZones or {}) do
+        -- small tolerance for client/server position desync
+        if #(coords - zone.coords) <= (zone.radius + 2.0) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Combined gate for menu-open and any state mutation
+local function CanModifyVehicles(src)
+    return IsPlayerAuthorized(src) and IsPlayerInModZone(src)
+end
+
+-- Validate a client-supplied netId actually maps to a vehicle the caller is
+-- standing next to (prevents mutating arbitrary/other players' vehicles).
+local function ResolveCallerVehicle(src, netId)
+    if type(netId) ~= 'number' then return nil end
+    local vehicle = NetworkGetEntityFromNetworkId(netId)
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return nil end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return nil end
+    if #(GetEntityCoords(ped) - GetEntityCoords(vehicle)) > 10.0 then return nil end
+    return vehicle
+end
+
+-- Validate a livery file path (charset + .yft, no path traversal)
+local function IsSafeLiveryFile(file)
+    if type(file) ~= 'string' or file == '' or #file > 128 then return false end
+    if file:find('%.%.') then return false end            -- no traversal
+    if not file:match('^[%w%s%-_/%.]+$') then return false end -- safe charset only
+    return true
+end
+
+local function DenyNotify(src, msg)
+    TriggerClientEvent('ox_lib:notify', src, {
+        title = 'Access Denied',
+        description = msg or 'You are not authorized to do that.',
+        type = 'error',
+        duration = 5000
+    })
+end
+
+-- ox_lib server callback: authoritative gate the client checks before opening the menu
+lib.callback.register('vehiclemods:server:canAccessMenu', function(src)
+    if not IsPlayerAuthorized(src) then
+        return false, 'Your job does not permit vehicle modifications.'
+    end
+    if not IsPlayerInModZone(src) then
+        return false, 'You must be at a designated emergency services garage.'
+    end
+    return true
+end)
+
 -- Initialize database
 local ox_mysql = exports['oxmysql']
 
@@ -367,35 +476,53 @@ CreateThread(function()
 end)
 
 -- Apply a custom livery to a vehicle
+-- M1 FIX: was AddEventHandler-only (dead path). Now registered as a net event
+-- with server-side auth + netId validation. Broadcast stays -1 so the cosmetic
+-- change renders for every client that streams the vehicle, but only after the
+-- caller is proven authorized and standing at the validated vehicle.
+RegisterNetEvent('vehiclemods:server:applyCustomLivery')
 AddEventHandler('vehiclemods:server:applyCustomLivery', function(netId, vehicleModelName, liveryFile)
     local src = source
-    local vehicle = NetworkGetEntityFromNetworkId(netId)
-    
-    if not vehicle or not DoesEntityExist(vehicle) then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Error',
-            description = 'Vehicle not found.',
-            type = 'error',
-            duration = 5000
-        })
-        return
+
+    if not CanModifyVehicles(src) then
+        return DenyNotify(src, 'You are not authorized to modify vehicles here.')
     end
-    
+
+    local vehicle = ResolveCallerVehicle(src, netId)
+    if not vehicle then
+        return DenyNotify(src, 'Vehicle not found or out of range.')
+    end
+
+    if not IsSafeLiveryFile(liveryFile) then
+        return DenyNotify(src, 'Invalid livery file.')
+    end
+
     TriggerClientEvent('vehiclemods:client:setCustomLivery', -1, netId, vehicleModelName, liveryFile)
-    
+
     if Config.Debug then
-        print("^2DEBUG:^0 Applied custom livery " .. vehicleModelName .. "/" .. liveryFile .. " to vehicle with netId " .. netId)
+        print("^2DEBUG:^0 Applied custom livery " .. tostring(vehicleModelName) .. "/" .. tostring(liveryFile) .. " to vehicle with netId " .. tostring(netId))
     end
 end)
 
 -- Clear custom livery from a vehicle
 RegisterNetEvent('vehiclemods:server:clearCustomLivery')
 AddEventHandler('vehiclemods:server:clearCustomLivery', function(netId)
-    -- Broadcast to all clients to clear the custom livery
+    local src = source
+
+    if not CanModifyVehicles(src) then
+        return DenyNotify(src, 'You are not authorized to modify vehicles here.')
+    end
+
+    local vehicle = ResolveCallerVehicle(src, netId)
+    if not vehicle then
+        return DenyNotify(src, 'Vehicle not found or out of range.')
+    end
+
+    -- Broadcast to all clients to clear the custom livery (validated netId)
     TriggerClientEvent('vehiclemods:client:clearCustomLivery', -1, netId)
-    
+
     if Config.Debug then
-        print("^2DEBUG:^0 Cleared custom livery from vehicle with netId " .. netId)
+        print("^2DEBUG:^0 Cleared custom livery from vehicle with netId " .. tostring(netId))
     end
 end)
 
@@ -404,11 +531,23 @@ RegisterNetEvent('vehiclemods:server:saveModifications')
 AddEventHandler('vehiclemods:server:saveModifications', function(vehicleModel, vehicleProps)
     local src = source
     local playerId = tostring(src) -- In standalone mode, use the player's server ID
-    
+
+    if not CanModifyVehicles(src) then
+        return DenyNotify(src, 'You are not authorized to save vehicle modifications here.')
+    end
+
+    -- Input validation: reject malformed/oversized DB writes
+    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
+        return DenyNotify(src, 'Invalid vehicle model.')
+    end
+    if type(vehicleProps) ~= 'string' or #vehicleProps > 65535 then
+        return DenyNotify(src, 'Invalid vehicle data.')
+    end
+
     if Config.Debug then
         print("^2DEBUG:^0 Saving modifications for vehicle: " .. vehicleModel)
     end
-    
+
     ox_mysql:execute("INSERT INTO vehicle_mods (vehicle_model, extras, player_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE extras = VALUES(extras)",
         {vehicleModel, vehicleProps, playerId})
         
@@ -425,13 +564,34 @@ end)
 RegisterNetEvent('vehiclemods:server:addCustomLivery')
 AddEventHandler('vehiclemods:server:addCustomLivery', function(vehicleModel, liveryName, liveryFile)
     local src = source
-    
+
+    -- Server-side authorization
+    if not CanModifyVehicles(src) then
+        return DenyNotify(src, 'You are not authorized to add liveries here.')
+    end
+
+    -- Input validation
+    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
+        return DenyNotify(src, 'Invalid vehicle model.')
+    end
+
+    -- M4 FIX: validate livery name (length/charset) before it hits the DB
+    local nameOk, nameOrErr = Config.ValidateName(liveryName)
+    if not nameOk then
+        return DenyNotify(src, nameOrErr or 'Invalid livery name.')
+    end
+    liveryName = nameOrErr -- use trimmed/validated value
+
+    if not IsSafeLiveryFile(liveryFile) then
+        return DenyNotify(src, 'Invalid livery file.')
+    end
+
     -- Don't add "liveries/" prefix to the file path anymore
     -- Just ensure it has .yft extension
     if not string.match(liveryFile, "%.yft$") then
         liveryFile = liveryFile .. ".yft"
     end
-    
+
     -- First, check if the vehicle model exists in the custom liveries config
     if not Config.CustomLiveries[vehicleModel:lower()] then
         Config.CustomLiveries[vehicleModel:lower()] = {}
@@ -474,9 +634,16 @@ RegisterNetEvent('vehiclemods:server:requestVehicleConfig')
 AddEventHandler('vehiclemods:server:requestVehicleConfig', function(vehicleModel)
     local src = source
     local playerId = tostring(src) -- In standalone mode, use the player's server ID
-    
+
+    if not IsPlayerAuthorized(src) then
+        return DenyNotify(src, 'Your job does not permit vehicle modifications.')
+    end
+    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
+        return
+    end
+
     -- Check if config exists in database
-    ox_mysql:execute('SELECT extras FROM vehicle_mods WHERE vehicle_model = ?', {vehicleModel}, 
+    ox_mysql:execute('SELECT extras FROM vehicle_mods WHERE vehicle_model = ?', {vehicleModel},
         function(result)
             if result and result[1] and result[1].extras then
                 -- Send the configuration back to the client
@@ -498,7 +665,17 @@ end)
 RegisterNetEvent('vehiclemods:server:removeCustomLivery')
 AddEventHandler('vehiclemods:server:removeCustomLivery', function(vehicleModel, liveryName)
     local src = source
-    
+
+    if not CanModifyVehicles(src) then
+        return DenyNotify(src, 'You are not authorized to remove liveries here.')
+    end
+    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
+        return DenyNotify(src, 'Invalid vehicle model.')
+    end
+    if type(liveryName) ~= 'string' or liveryName == '' then
+        return DenyNotify(src, 'Invalid livery name.')
+    end
+
     -- Check if the vehicle model exists in the custom liveries config
     if not Config.CustomLiveries[vehicleModel:lower()] then
         TriggerClientEvent('ox_lib:notify', src, {
@@ -548,6 +725,9 @@ end)
 RegisterNetEvent('vehiclemods:server:requestCustomLiveries')
 AddEventHandler('vehiclemods:server:requestCustomLiveries', function()
     local src = source
+    if not IsPlayerAuthorized(src) then
+        return DenyNotify(src, 'Your job does not permit vehicle modifications.')
+    end
     TriggerClientEvent('vehiclemods:client:updateCustomLiveries', src, Config.CustomLiveries)
 end)
 
@@ -592,9 +772,10 @@ local function GetPlayerIdentifier(playerId)
     elseif currentFramework == 'qbcore' and frameworkObject then
         local Player = frameworkObject.Functions.GetPlayer(playerId)
         return Player and Player.PlayerData.citizenid or nil
-    elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        return Player and Player.PlayerData.citizenid or nil
+    elseif currentFramework == 'qbox' then
+        -- Discrete qbx_core export (no core object on this build)
+        local Player = exports.qbx_core:GetPlayer(playerId)
+        return Player and Player.PlayerData and Player.PlayerData.citizenid or nil
     end
     return 'player_' .. tostring(playerId) -- Fallback for standalone
 end
@@ -611,9 +792,10 @@ local function GetPlayerJob(playerId)
         if Player then
             return Player.PlayerData.job.name, Player.PlayerData.job.grade.level
         end
-    elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
+    elseif currentFramework == 'qbox' then
+        -- Discrete qbx_core export (no core object on this build)
+        local Player = exports.qbx_core:GetPlayer(playerId)
+        if Player and Player.PlayerData then
             return Player.PlayerData.job.name, Player.PlayerData.job.grade.level
         end
     end
@@ -984,9 +1166,10 @@ local function GetPlayerMoney(playerId, moneyType)
                 return Player.PlayerData.money.cash
             end
         end
-    elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
+    elseif currentFramework == 'qbox' then
+        -- Discrete qbx_core export (no core object on this build)
+        local Player = exports.qbx_core:GetPlayer(playerId)
+        if Player and Player.PlayerData then
             if moneyType == 'bank' then
                 return Player.PlayerData.money.bank
             else
@@ -1015,9 +1198,10 @@ local function RemoveMoney(playerId, amount, moneyType)
             Player.Functions.RemoveMoney(moneyType, amount, 'vehicle-repair')
             return true
         end
-    elseif currentFramework == 'qbox' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
+    elseif currentFramework == 'qbox' then
+        -- Discrete qbx_core export (no core object on this build)
+        local Player = exports.qbx_core:GetPlayer(playerId)
+        if Player and Player.Functions then
             Player.Functions.RemoveMoney(moneyType, amount, 'vehicle-repair')
             return true
         end
@@ -1065,6 +1249,25 @@ AddEventHandler('vehiclemods:server:chargeRepair', function(repairType, cost)
         TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, true)
         return
     end
+
+    -- H3 FIX: derive cost SERVER-SIDE from config. The client-supplied `cost`
+    -- is ignored (a malicious client could send 0/negative). Damage-scaling is
+    -- intentionally not trusted from the client; base cost per repair type is used.
+    local serverCostByType = {
+        full = cfg.fullRepairCost or 0,
+        emergency = cfg.emergencyRepairCost or 0,
+        field = cfg.fieldRepairCost or 0
+    }
+    local baseCost = serverCostByType[repairType]
+    if baseCost == nil then
+        -- Unknown repair type -> reject
+        TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, false, 'Invalid repair type')
+        return
+    end
+    if Config.Debug and type(cost) == 'number' and cost ~= baseCost then
+        print(("^3[REPAIR-COST]:^0 Ignoring client cost %s; using server cost %d for %s"):format(tostring(cost), baseCost, tostring(repairType)))
+    end
+    cost = baseCost
 
     -- Check jg-scripts compatibility (defer to jg-mechanic for repairs)
     local jgCompat = Config.Compatibility and Config.Compatibility['jg-scripts']

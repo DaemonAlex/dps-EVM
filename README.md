@@ -2,7 +2,7 @@
 
 [![FiveM](https://img.shields.io/badge/FiveM-Resource-blue)](https://fivem.net/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.0.1-orange)](https://github.com/DaemonAlex/EmergencyVehicleMenu)
+[![Version](https://img.shields.io/badge/Version-2.3.0-orange)](https://github.com/DaemonAlex/EmergencyVehicleMenu)
 
 ## 🚀 **Zero-Configuration Emergency Vehicle Modification System**
 

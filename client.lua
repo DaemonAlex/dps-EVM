@@ -221,6 +221,21 @@ end)
 -- Main menu event
 RegisterNetEvent('vehiclemods:client:openVehicleModMenu')
 AddEventHandler('vehiclemods:client:openVehicleModMenu', function()
+    -- SERVER-SIDE AUTHORIZATION GATE (single choke point for every entry path:
+    -- /modveh command, F7 keybind, auto-open zone thread, and submenu re-opens).
+    -- The server re-checks emergency job + real zone distance; the client cannot
+    -- bypass this by triggering the event directly.
+    local canAccess, denyMsg = lib.callback.await('vehiclemods:server:canAccessMenu', false)
+    if not canAccess then
+        lib.notify({
+            title = 'Access Denied',
+            description = denyMsg or 'You are not authorized to use vehicle modifications.',
+            type = 'error',
+            duration = 5000
+        })
+        return
+    end
+
     local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
     local vehicleTitle = "Vehicle Menu"
     local vehicleInfo = nil
@@ -336,22 +351,24 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function()
         })
     end
 
-    -- These options should always be available
-    table.insert(options, {
-        title = 'Emergency Repair',
-        description = 'Partial repair for disabled vehicles (slow movement only)',
-        onSelect = function()
-            EmergencyRepairVehicle()
-        end
-    })
+    -- Repair options honor the Config.EnabledModifications.Repair toggle
+    if Config.EnabledModifications.Repair then
+        table.insert(options, {
+            title = 'Emergency Repair',
+            description = 'Partial repair for disabled vehicles (slow movement only)',
+            onSelect = function()
+                EmergencyRepairVehicle()
+            end
+        })
 
-    table.insert(options, {
-        title = 'Full Repair',
-        description = 'Complete vehicle repair and performance restoration',
-        onSelect = function()
-            FullRepairVehicle()
-        end
-    })
+        table.insert(options, {
+            title = 'Full Repair',
+            description = 'Complete vehicle repair and performance restoration',
+            onSelect = function()
+                FullRepairVehicle()
+            end
+        })
+    end
 
     -- Preset System (v2.1.0+)
     if Config.Presets and Config.Presets.enabled then

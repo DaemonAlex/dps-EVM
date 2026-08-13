@@ -3,8 +3,8 @@ Config = {}
 -----------------------------------------------------------
 -- [[ 1. CORE SETTINGS ]]
 -----------------------------------------------------------
-Config.Debug = true                   -- Keep TRUE while setting up. Set FALSE for production.
-Config.CheckUpdates = true            -- Check for script updates on startup
+Config.Debug = false                  -- DSRP: production. Set TRUE only while setting up.
+Config.CheckUpdates = false           -- DSRP private fork: no external GitHub version ping
 Config.AutoConfigure = true           -- Auto-configure framework, zones, vehicles
 
 -----------------------------------------------------------
@@ -20,9 +20,9 @@ Config.JobCacheTimeout = 300000       -- 5 minutes cache duration (ms)
 -----------------------------------------------------------
 -- [[ 3. JOB ACCESS CONTROL ]]
 -----------------------------------------------------------
-Config.EnableJobRestrictions = false   -- Enable job-based zone restrictions
+Config.EnableJobRestrictions = true    -- DSRP: emergency-job restriction ON (enforced server-side)
 Config.EnableGradeRestrictions = false -- Enable grade/rank requirements
-Config.DisableZoneRestrictions = true -- Set TRUE to bypass all zone checks (admin testing)
+Config.DisableZoneRestrictions = false -- DSRP: zone checks ON (enforced server-side)
 
 -- Job name mappings (add your custom job names here)
 Config.JobMappings = {
@@ -231,7 +231,7 @@ function Config.AutoConfigureFramework()
             allowedJobs = {'police', 'ambulance', 'fire'},
             useJobGrades = true,
             minGrade = 0,
-            resourceName = 'qbox-core'
+            resourceName = 'qbx_core'
         },
         standalone = {
             jobRestriction = false,
@@ -453,7 +453,7 @@ Config.UndercoverNeon = {
 -- Other display settings
 Config.ShowBlips = false        -- Show modification zone blips on map
 Config.ShowMarkers = false      -- Show ground markers at zones
-Config.EmergencyVehiclesOnly = false  -- Only allow emergency vehicles (set FALSE for testing)
+Config.EmergencyVehiclesOnly = true   -- DSRP: only emergency vehicles may be modified
 
 -----------------------------------------------------------
 -- THIRD-PARTY SCRIPT COMPATIBILITY (v2.1.2+)
@@ -788,7 +788,9 @@ function Config.GetJobFromFramework(playerId, framework, frameworkObject)
             local job = Player.PlayerData.job
             return {
                 name = job.name,
-                grade = job.grade,
+                -- LOW fix: return numeric grade level (consistent with .grade.level
+                -- read elsewhere) now that job restrictions are ON
+                grade = job.grade and job.grade.level or job.grade,
                 label = job.label
             }
         end

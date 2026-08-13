@@ -2,6 +2,48 @@
 
 All notable changes to the Emergency Vehicle Menu project will be documented in this file.
 
+## [2.3.0] - 2026-08-12 - **DSRP Security & Qbox Framework Hardening**
+
+Private DelPerro Sands RP fork. Fixes a broken Qbox server framework layer and
+the absence of any server-side authorization (previously any civilian could
+modify any vehicle). Version reconciled: prior docs drifted (README/CHANGELOG
+2.0.1 vs manifest 2.2.0-DSRP) and are now aligned to the manifest at 2.3.0.
+
+### 🔒 Security (critical)
+- **C1 — Qbox server init no longer throws.** Removed `exports['qb-core']:GetCoreObject()`
+  for the `qbox` branch (`server.lua` framework-init) — this build has no
+  `GetCoreObject`. `frameworkObject` is left `nil`; all Qbox access now uses
+  discrete `exports.qbx_core:GetPlayer(src)`.
+- **H1 — Server-side authorization added (core defect).** New authoritative
+  helpers (`GetAuthJobName`/`IsPlayerAuthorized`/`IsPlayerInModZone`/
+  `CanModifyVehicles`) and an ox_lib callback `vehiclemods:server:canAccessMenu`.
+  The client menu-open handler (`client.lua` `openVehicleModMenu`) now gates on
+  this callback — the single choke point for `/modveh`, F7, the auto-open zone
+  thread, and submenu re-opens. Server re-checks emergency job + real ped-coord
+  zone distance. DSRP config flipped: `DisableZoneRestrictions=false`,
+  `EnableJobRestrictions=true`, `EmergencyVehiclesOnly=true`, `Debug=false`.
+- **H2 — Unauthenticated net events secured.** `clearCustomLivery`,
+  `addCustomLivery`, `saveModifications`, `removeCustomLivery`,
+  `requestVehicleConfig`, `requestCustomLiveries` now enforce
+  job(+zone) auth and validate input. Client-supplied netIds are validated
+  against a real, nearby vehicle (`ResolveCallerVehicle`) before any broadcast.
+- **H3 — `chargeRepair` recomputes cost server-side** from `Config.RepairCosts`
+  by repair type; the client-supplied cost is ignored.
+- **M1 — Dead custom-YFT apply path fixed.** `applyCustomLivery` is now a proper
+  `RegisterNetEvent` with auth + netId validation (was `AddEventHandler`-only).
+- **M4 — `Config.ValidateName` now enforced** on livery names before DB writes.
+
+### 🔧 Fixes & cleanup
+- Qbox `GetPlayerIdentifier`/`GetPlayerJob`/`GetPlayerMoney`/`RemoveMoney` now
+  use discrete `exports.qbx_core:GetPlayer` instead of the (nil) core object.
+- Grade shape made consistent (`config.lua` Qbox `GetJobFromFramework` returns
+  numeric `job.grade.level`).
+- Repair menu options honor `Config.EnabledModifications.Repair`.
+- Fixed wrong Qbox resource name `qbox-core` → `qbx_core` (`config.lua`).
+- External GitHub version-checker disabled for this private fork
+  (`Config.CheckUpdates=false`; ping is now gated and non-fatal).
+- Removed unreferenced `test_script.lua`.
+
 ## [2.0.1] - 2024-09-23 - **Zone Optimization & Performance Update**
 
 ### 🔧 **Zone Fixes & Optimizations**
