@@ -24,6 +24,13 @@ Config.EnableJobRestrictions = true    -- DSRP: emergency-job restriction ON (en
 Config.EnableGradeRestrictions = false -- Enable grade/rank requirements
 Config.DisableZoneRestrictions = false -- DSRP: zone checks ON (enforced server-side)
 
+-- Keep the hand-authored mappings below. Without this flag,
+-- Config.AutoConfigureJobSystem() runs during Initialize and OVERWRITES this
+-- table with a generic list, silently dropping saspr/statepolice/trooper from
+-- police and the whole mechanic group, so those jobs failed authorization even
+-- though they are listed here.
+Config.ManualJobSystem = true
+
 -- Job name mappings (add your custom job names here)
 Config.JobMappings = {
     police = {'police', 'lspd', 'bcso', 'sheriff', 'sahp', 'saspr', 'statepolice', 'trooper'},
@@ -35,7 +42,11 @@ Config.JobMappings = {
 -----------------------------------------------------------
 -- [[ 4. ZONE CONFIGURATION ]]
 -----------------------------------------------------------
-Config.ManualZones = false             -- Use manual zone definitions below
+-- Both of these were false, so AutoConfigureZones assigned nothing and Initialize
+-- never copied ManualModificationZones. ValidateConfiguration then fell back to a
+-- single default zone and the server logged "No modification zones configured!",
+-- leaving all of the stations below dead - the menu only opened at that one spot.
+Config.ManualZones = true              -- Use manual zone definitions below
 Config.AutoDetectZones = false        -- Disable auto-zone detection when using manual
 
 -- Manual modification zones with Grade 0 access (ALL ranks can use)
