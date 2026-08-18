@@ -1,0 +1,22 @@
+# Normalize line endings (the live-server import churned these to CRLF,
+# losing git blame and creating phantom whole-file diffs). Pin to LF.
+* text=auto eol=lf
+
+# Binary assets - never touch
+*.png binary
+*.jpg binary
+*.ogg binary
+*.wav binary
+*.ytd binary
+*.yft binary
+*.ymap binary
+*.ytyp binary
+*.ydr binary
+*.ybn binary
+*.ycd binary
+*.awc binary
+*.rel binary
+*.dat binary
+*.dds binary
+*.ttf binary
+*.otf binary
