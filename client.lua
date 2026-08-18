@@ -752,11 +752,11 @@ AddEventHandler('vehiclemods:client:setCustomLivery', function(netId, vehicleMod
             end
         end
         
-        -- Update entity routing to refresh appearance
-        local currentBucket = GetEntityRoutingBucket(vehicle)
-        SetEntityRoutingBucket(vehicle, 100 + currentBucket)
-        Wait(50)
-        SetEntityRoutingBucket(vehicle, currentBucket)
+        -- NOTE: GetEntityRoutingBucket/SetEntityRoutingBucket are SERVER-only
+        -- natives. Calling them here threw "attempt to call a nil value" on every
+        -- client each time any player applied a custom livery, aborting this
+        -- handler part-way through. The texture swap below is what actually
+        -- refreshes the appearance, so the bucket bounce is simply removed.
         
         print("^2INFO:^0 Applied custom livery " .. liveryFile .. " to vehicle")
     else
@@ -792,23 +792,20 @@ end)
 
 -- Add custom livery menu
 function OpenAddCustomLiveryMenu(vehicleModelName)
-    lib.showTextInput({
-        title = 'Add Custom Livery',
-        description = 'Enter the name and YFT file for the new livery:',
-        fields = {
-            { label = 'Livery Name', name = 'name', type = 'text', required = true, placeholder = 'e.g. Police Livery 1' },
-            { label = 'YFT File Path', name = 'file', type = 'text', required = true, placeholder = vehicleModelName .. '_livery1.yft' }
-        },
-        onSubmit = function(data)
-            if data.name and data.file then
-                TriggerServerEvent('vehiclemods:server:addCustomLivery', vehicleModelName, data.name, data.file)
-                
-                Citizen.SetTimeout(500, function()
-                    OpenCustomLiveriesMenu()
-                end)
-            end
-        end
+    -- lib.showTextInput is not an ox_lib API; this threw immediately and made
+    -- the whole add-custom-livery path (and its server handler) unreachable.
+    local input = lib.inputDialog('Add Custom Livery', {
+        { type = 'input', label = 'Livery Name', required = true, placeholder = 'e.g. Police Livery 1' },
+        { type = 'input', label = 'YFT File Path', required = true, placeholder = vehicleModelName .. '_livery1.yft' },
     })
+
+    if input and input[1] and input[2] then
+        TriggerServerEvent('vehiclemods:server:addCustomLivery', vehicleModelName, input[1], input[2])
+
+        Citizen.SetTimeout(500, function()
+            OpenCustomLiveriesMenu()
+        end)
+    end
 end
 
 -- Function to search for liveries
@@ -819,18 +816,17 @@ function OpenLiverySearchMenu()
         return
     end
     
-    lib.showTextInput({
-        title = 'Search Liveries',
-        description = 'Enter a search term to filter liveries',
-        placeholder = 'e.g. LSPD or Sheriff',
-        onSubmit = function(data)
-            if data and data ~= "" then
-                FilteredLiveryMenu(data:lower())
-            else
-                OpenLiveryMenu()
-            end
-        end
+    -- same fix as above: lib.showTextInput does not exist in ox_lib
+    local input = lib.inputDialog('Search Liveries', {
+        { type = 'input', label = 'Search term', placeholder = 'e.g. LSPD or Sheriff' },
     })
+
+    local term = input and input[1]
+    if term and term ~= '' then
+        FilteredLiveryMenu(term:lower())
+    else
+        OpenLiveryMenu()
+    end
 end
 
 -- Function to filter liveries by search term

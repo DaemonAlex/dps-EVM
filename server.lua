@@ -732,28 +732,15 @@ AddEventHandler('vehiclemods:server:requestCustomLiveries', function()
 end)
 
 -- Initialize custom liveries when resource starts
+-- NOTE: custom liveries are already loaded into Config.CustomLiveries during
+-- initialisation above. This handler loaded them a SECOND time and appended into
+-- the same tables with no de-dup, so after every start each livery appeared twice
+-- in the menus, the duplicated list was broadcast to all clients, and the
+-- per-vehicle livery cap was effectively halved. (The duplicate log line
+-- "No custom liveries found in database." printed twice made it visible.)
 AddEventHandler('onResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
-    
-    -- Load all custom liveries from database
-    ox_mysql:execute("SELECT vehicle_model, livery_name, livery_file FROM custom_liveries", {}, function(result)
-        if result and #result > 0 then
-            for _, livery in ipairs(result) do
-                if not Config.CustomLiveries[livery.vehicle_model] then
-                    Config.CustomLiveries[livery.vehicle_model] = {}
-                end
-                
-                table.insert(Config.CustomLiveries[livery.vehicle_model], {
-                    name = livery.livery_name,
-                    file = livery.livery_file
-                })
-            end
-            
-            print("^2INFO:^0 Loaded " .. #result .. " custom liveries from database.")
-        else
-            print("^3INFO:^0 No custom liveries found in database.")
-        end
-    end)
+    -- intentionally no livery reload here; see note above
 end)
 
 -- Duplicate event handler removed - functionality already exists above
@@ -953,6 +940,32 @@ AddEventHandler('vehiclemods:server:savePreset', function(presetName, vehicleMod
     local identifier = GetPlayerIdentifier(src)
     local cfg = Config.Presets
 
+    -- This handler had no authorization at all: any connected player, any job,
+    -- anywhere on the map could write rows of arbitrary JSON into vehicle_presets.
+    if not CanModifyVehicles(src) then return end
+
+    -- vehicleModel is indexed with :lower() further down; a non-string threw.
+    if type(vehicleModel) ~= 'string' then return end
+
+    -- presetName was never validated even though Config.ValidateName exists.
+    local okName, nameErr = Config.ValidateName(presetName)
+    if not okName then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error', description = nameErr or 'Invalid preset name', type = 'error'
+        })
+        return
+    end
+
+    -- Bound the payload: presetData was arbitrary client JSON of unbounded size.
+    if type(presetData) ~= 'table' then return end
+    local encoded = json.encode(presetData)
+    if not encoded or #encoded > (cfg.maxPresetBytes or 16384) then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error', description = 'Preset is too large', type = 'error'
+        })
+        return
+    end
+
     if not cfg or not cfg.enabled then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'Error',
@@ -982,6 +995,22 @@ AddEventHandler('vehiclemods:server:savePreset', function(presetName, vehicleMod
         {identifier},
         function(result)
             local personalCount = result and result[1] and result[1].count or 0
+
+            -- Job presets skipped the count check entirely, so maxPresetsPerJob
+            -- was never enforced: unlimited rows via the job-preset branch.
+            if isJobPreset and jobPresetName then
+                local jobRows = ox_mysql:executeSync(
+                    'SELECT COUNT(*) as count FROM vehicle_presets WHERE job_preset = ?', { jobPresetName })
+                local jobCount = jobRows and jobRows[1] and jobRows[1].count or 0
+                if jobCount >= (cfg.maxPresetsPerJob or 25) then
+                    TriggerClientEvent('ox_lib:notify', src, {
+                        title = 'Limit Reached',
+                        description = ('Maximum %d job presets allowed'):format(cfg.maxPresetsPerJob or 25),
+                        type = 'error'
+                    })
+                    return
+                end
+            end
 
             if not isJobPreset and personalCount >= cfg.maxPresetsPerPlayer then
                 TriggerClientEvent('ox_lib:notify', src, {
@@ -1089,7 +1118,23 @@ AddEventHandler('vehiclemods:server:saveLiveryMemory', function(vehicleModel, li
 
     if not cfg or not cfg.enabled then return end
 
-    local extrasJson = extras and json.encode(extras) or nil
+    -- No authorization and no type check: a client could loop this with random
+    -- model strings and grow player_livery_memory without bound (the UNIQUE key
+    -- is identifier+model, so every new string was a new row).
+    if not IsPlayerAuthorized(src) then return end
+    if type(vehicleModel) ~= 'string' or #vehicleModel == 0 or #vehicleModel > 64 then return end
+
+    -- The client sends the whole ActiveCustomLiveries entry table here, which
+    -- oxmysql cannot bind, and a nil in the middle of the params array leaves a
+    -- hole that mismatches the placeholders. Normalise to a validated string.
+    if type(customLivery) == 'table' then
+        customLivery = customLivery.file
+    end
+    if type(customLivery) ~= 'string' or not IsSafeLiveryFile(customLivery) then
+        customLivery = nil
+    end
+
+    local extrasJson = (type(extras) == 'table') and json.encode(extras) or nil
 
     ox_mysql:execute([[
         INSERT INTO player_livery_memory (identifier, vehicle_model, livery_index, livery_mod, custom_livery, extras)
@@ -1100,7 +1145,8 @@ AddEventHandler('vehiclemods:server:saveLiveryMemory', function(vehicleModel, li
             custom_livery = VALUES(custom_livery),
             extras = VALUES(extras),
             updated_at = CURRENT_TIMESTAMP
-    ]], {identifier, vehicleModel:lower(), liveryIndex or -1, liveryMod or -1, customLivery, extrasJson})
+    ]], {identifier, vehicleModel:lower(), tonumber(liveryIndex) or -1, tonumber(liveryMod) or -1,
+         customLivery or false, extrasJson or false})
 
     if Config.Debug then
         print(("^2[LIVERY-MEMORY]:^0 Saved for %s: %s (livery: %d, mod: %d, custom: %s)"):format(
@@ -1116,6 +1162,8 @@ AddEventHandler('vehiclemods:server:loadLiveryMemory', function(vehicleModel)
     local cfg = Config.AutoApplyLivery
 
     if not cfg or not cfg.enabled then return end
+    if not IsPlayerAuthorized(src) then return end
+    if type(vehicleModel) ~= 'string' or #vehicleModel == 0 or #vehicleModel > 64 then return end
 
     ox_mysql:execute(
         'SELECT livery_index, livery_mod, custom_livery, extras FROM player_livery_memory WHERE identifier = ? AND vehicle_model = ?',
