@@ -991,17 +991,21 @@ AddEventHandler('vehiclemods:server:savePreset', function(presetName, vehicleMod
 
     -- Check preset limits
     ox_mysql:execute(
-        'SELECT COUNT(*) as count FROM vehicle_presets WHERE owner_identifier = ? AND job_preset IS NULL',
-        {identifier},
+        [[SELECT
+            SUM(CASE WHEN owner_identifier = ? AND job_preset IS NULL THEN 1 ELSE 0 END) AS personal_count,
+            SUM(CASE WHEN job_preset = ? THEN 1 ELSE 0 END) AS job_count
+          FROM vehicle_presets]],
+        {identifier, jobPresetName or ''},
         function(result)
-            local personalCount = result and result[1] and result[1].count or 0
+            local row = result and result[1]
+            local personalCount = (row and tonumber(row.personal_count)) or 0
+            local jobCount = (row and tonumber(row.job_count)) or 0
 
             -- Job presets skipped the count check entirely, so maxPresetsPerJob
             -- was never enforced: unlimited rows via the job-preset branch.
+            -- Both counts come from the single query above; this resource uses
+            -- the callback form of ox_mysql:execute everywhere and nothing else.
             if isJobPreset and jobPresetName then
-                local jobRows = ox_mysql:executeSync(
-                    'SELECT COUNT(*) as count FROM vehicle_presets WHERE job_preset = ?', { jobPresetName })
-                local jobCount = jobRows and jobRows[1] and jobRows[1].count or 0
                 if jobCount >= (cfg.maxPresetsPerJob or 25) then
                     TriggerClientEvent('ox_lib:notify', src, {
                         title = 'Limit Reached',
