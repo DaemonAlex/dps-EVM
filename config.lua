@@ -22,7 +22,7 @@ Config.JobCacheTimeout = 300000       -- 5 minutes cache duration (ms)
 -----------------------------------------------------------
 Config.EnableJobRestrictions = true    -- DSRP: emergency-job restriction ON (enforced server-side)
 Config.EnableGradeRestrictions = false -- Enable grade/rank requirements
-Config.DisableZoneRestrictions = false -- DSRP: zone checks ON (enforced server-side)
+Config.DisableZoneRestrictions = true  -- DSRP 2026-08-22: zones OFF — emergency jobs may modify anywhere (job check still enforced server-side)
 
 -- Keep the hand-authored mappings below. Without this flag,
 -- Config.AutoConfigureJobSystem() runs during Initialize and OVERWRITES this

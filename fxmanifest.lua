@@ -22,7 +22,8 @@ server_scripts {
 
 dependencies {
     'ox_lib',
-    'oxmysql'
+    'oxmysql',
+    'ox_target'
 }
 
 lua54 'yes'

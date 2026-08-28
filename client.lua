@@ -49,9 +49,15 @@ local TEXTURE_LOAD_TIMEOUT = 300
 local loadedTextures = {}
 
 -- Command to open the vehicle modification menu
+
 RegisterCommand('modveh', function()
     local playerCoords = GetEntityCoords(PlayerPedId())
     local inZone, zoneInfo = Config.IsInModificationZone(playerCoords)
+    local adminBypass = lib.callback.await('dps-EVM:server:isAdmin', false)
+    if adminBypass then
+        inZone = true
+        zoneInfo = { message = 'Admin: open anywhere' }
+    end
     
     if not inZone then
         lib.notify({
@@ -76,7 +82,7 @@ RegisterCommand('modveh', function()
     end
     
     -- Check if vehicle is an emergency vehicle (if restriction is enabled)
-    if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(vehicle) then
+    if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(vehicle) and not adminBypass then
         lib.notify({
             title = 'Vehicle Not Authorized',
             description = 'Only emergency vehicles can be modified here',
@@ -98,129 +104,24 @@ function DisplayHelpTextThisFrame(text, beep)
 end
 
 -- Add a keybind to quickly open the menu without typing the command
-RegisterKeyMapping('modveh', 'Open Vehicle Modification Menu', 'keyboard', 'F7')
+-- F7 released to klb_exhaustaudio, which had the same default and is a global
+-- tool. EVM is contextual (you must be beside a vehicle inside a modification
+-- zone), so it is reached by targeting the vehicle instead. The empty default
+-- leaves /modveh bindable by hand in FiveM's keybind settings for anyone who
+-- prefers a key.
+RegisterKeyMapping('modveh', 'Open Vehicle Modification Menu', 'keyboard', '')
 
 -- Initialize variables
 ActiveCustomLiveries = {}
 
--- Zone blips and markers
-local zoneBlips = {}
+-- Zone feature removed entirely (Damon 2026-08-22): access is JOB-gated
+-- (police/fire/EMS via server checks). No zone blips, no zone scanning.
 
--- Create blips for modification zones
-CreateThread(function()
-    if not Config.ShowBlips then return end
-
-    for i, zone in ipairs(Config.ModificationZones) do
-        local blip = AddBlipForCoord(zone.coords.x, zone.coords.y, zone.coords.z)
-
-        if zone.type == "police" then
-            SetBlipSprite(blip, 60) -- Police station
-            SetBlipColour(blip, 3) -- Light blue
-        elseif zone.type == "fire" then
-            SetBlipSprite(blip, 436) -- Fire station
-            SetBlipColour(blip, 1) -- Red
-        else
-            SetBlipSprite(blip, 446) -- Garage
-            SetBlipColour(blip, 5) -- Yellow
-        end
-
-        SetBlipScale(blip, 0.8)
-        SetBlipAsShortRange(blip, true)
-        BeginTextCommandSetBlipName("STRING")
-        AddTextComponentString(zone.name)
-        EndTextCommandSetBlipName(blip)
-
-        zoneBlips[i] = blip
-    end
-end)
-
--- Invisible zone checking - no visual markers, only access control
-local lastAccessAttempt = {}
-local ACCESS_COOLDOWN = 2000 -- 2 seconds between access attempts per zone
-
--- Performance-optimized zone checking with dynamic tick rates
--- Uses tiered sleep similar to FiveM best practices:
--- >100m: 2000ms (deep sleep), 30-100m: 1000ms, <30m: 500ms, in-zone: 250ms
-CreateThread(function()
-    while true do
-        local sleep = 2000  -- Default: deep sleep when far from all zones
-        local playerPed = PlayerPedId()
-        local vehicle = GetVehiclePedIsIn(playerPed, false)
-
-        -- Early exit if not in vehicle - no need to check zones
-        if vehicle == 0 then
-            Wait(sleep)
-            goto continue
-        end
-
-        local playerCoords = GetEntityCoords(playerPed)
-        local currentTime = GetGameTimer()
-        local nearestDistance = 999999.0
-        local inAnyZone = false
-
-        -- Find nearest zone and check if in any zone
-        for i, zone in ipairs(Config.ModificationZones) do
-            local distance = #(playerCoords - zone.coords)
-
-            -- Track nearest zone for dynamic sleep calculation
-            if distance < nearestDistance then
-                nearestDistance = distance
-            end
-
-            -- Check if in this zone
-            if distance <= zone.radius then
-                inAnyZone = true
-
-                -- Player entered zone with vehicle - check access with cooldown
-                if not lastAccessAttempt[i] or (currentTime - lastAccessAttempt[i]) >= ACCESS_COOLDOWN then
-                    lastAccessAttempt[i] = currentTime
-
-                    -- Check zone access
-                    local inZone, zoneInfo = Config.IsInModificationZone(playerCoords)
-
-                    if inZone then
-                        -- Access granted - show success notification and open menu
-                        lib.notify({
-                            title = 'Access Granted',
-                            description = zoneInfo.message,
-                            type = 'success',
-                            duration = 3000
-                        })
-                        TriggerEvent('vehiclemods:client:openVehicleModMenu')
-                    else
-                        -- Access denied - show error notification
-                        lib.notify({
-                            title = 'Access Denied',
-                            description = zoneInfo.message,
-                            type = 'error',
-                            duration = 4000
-                        })
-                    end
-                end
-                break  -- Already in a zone, no need to check others
-            end
-        end
-
-        -- Dynamic sleep based on distance to nearest zone
-        -- Optimized thresholds prevent wasted CPU cycles
-        if inAnyZone then
-            sleep = 250   -- In zone: responsive for menu interaction
-        elseif nearestDistance < 30.0 then
-            sleep = 500   -- Close: approaching zone
-        elseif nearestDistance < 100.0 then
-            sleep = 1000  -- Medium: zone visible on minimap
-        else
-            sleep = 2000  -- Far: deep sleep, conserve resources
-        end
-
-        Wait(sleep)
-        ::continue::
-    end
-end)
+-- (zone scanner thread removed with the zone feature)
 
 -- Main menu event
 RegisterNetEvent('vehiclemods:client:openVehicleModMenu')
-AddEventHandler('vehiclemods:client:openVehicleModMenu', function()
+AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
     -- SERVER-SIDE AUTHORIZATION GATE (single choke point for every entry path:
     -- /modveh command, F7 keybind, auto-open zone thread, and submenu re-opens).
     -- The server re-checks emergency job + real zone distance; the client cannot
@@ -236,7 +137,29 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function()
         return
     end
 
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    -- Resolve the subject vehicle: the ox_target entity (on foot) or the one the
+    -- player is sitting in. Guard against 0 so submenus never run natives on a null
+    -- entity, and enforce EmergencyVehiclesOnly HERE so no entry path can skip it.
+    local vehicle = targetVehicle
+    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+        vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    end
+    if vehicle == 0 then
+        lib.notify({ title = 'Vehicle Modification',
+            description = 'Get in or stand beside the vehicle to modify it.',
+            type = 'error', duration = 5000 })
+        return
+    end
+    if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(vehicle) then
+        local adminBypass = lib.callback.await('dps-EVM:server:isAdmin', false)
+        if not adminBypass then
+            lib.notify({ title = 'Vehicle Not Authorized',
+                description = 'Only emergency vehicles can be modified here',
+                type = 'error', duration = 5000 })
+            return
+        end
+    end
+
     local vehicleTitle = "Vehicle Menu"
     local vehicleInfo = nil
 
@@ -571,10 +494,7 @@ function OpenLiveryMenu(page)
         id = 'LiveryMenu',
         title = totalPages > 1 and ('Liveries (Page %d/%d)'):format(page, totalPages) or 'Select Livery',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('LiveryMenu')
 end
@@ -667,10 +587,7 @@ function OpenCustomLiveriesMenu()
         id = 'CustomLiveriesMenu',
         title = 'Custom Liveries',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('CustomLiveriesMenu')
 end
@@ -964,10 +881,7 @@ function FilteredLiveryMenu(searchTerm)
             {label = 'Results', value = filteredResults}
         },
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('FilteredLiveryMenu')
 end
@@ -1034,10 +948,7 @@ function OpenPerformanceMenu()
         id = 'PerformanceMenu',
         title = 'Performance Upgrades',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('PerformanceMenu')
 end
@@ -1176,10 +1087,7 @@ function OpenExtrasMenu()
         id = 'ExtrasMenu',
         title = 'Toggle Extras',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('ExtrasMenu')
 end
@@ -1254,10 +1162,7 @@ function OpenDoorsMenu()
         id = 'DoorsMenu',
         title = 'Doors Control',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('DoorsMenu')
 end
@@ -1380,10 +1285,7 @@ function OpenWindowControlsMenu()
         id = 'WindowControlsMenu',
         title = 'Window Controls',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('WindowControlsMenu')
 end
@@ -1541,10 +1443,7 @@ function OpenSeatControlsMenu()
         id = 'SeatControlsMenu',
         title = 'Seat Controls',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('SeatControlsMenu')
 end
@@ -1586,10 +1485,7 @@ function OpenAppearanceMenu()
         id = 'AppearanceMenu',
         title = 'Vehicle Appearance',
         options = options,
-        menu = 'VehicleModMenu',
-        onBack = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
+        menu = 'VehicleModMenu'
     })
     lib.showContext('AppearanceMenu')
 end
@@ -3660,3 +3556,43 @@ function GetZoneSuggestedColors()
     end
     return nil
 end
+
+
+-- ---------------------------------------------------------------------------
+-- ox_target entry point. Preferred over a keybind: EVM only applies to the
+-- vehicle you are standing at, inside a zone, so the interaction belongs on the
+-- vehicle rather than on a function key competing with everything else.
+-- ---------------------------------------------------------------------------
+local function RegisterEvmTarget()
+    exports.ox_target:addGlobalVehicle({
+        {
+            name     = 'dps_evm_modify',
+            icon     = 'fa-solid fa-screwdriver-wrench',
+            label    = 'Vehicle Modification',
+            distance = 3.0,
+            canInteract = function(entity)
+                if not entity or not DoesEntityExist(entity) then return false end
+                -- Only surface on emergency vehicles when the restriction is on,
+                -- so the option is not drawn on every civilian car in the world.
+                if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(entity) then
+                    return false
+                end
+                return true
+            end,
+            -- Pass the TARGETED vehicle through; the handler no longer relies on
+            -- GetVehiclePedIsIn (which is 0 when standing beside the vehicle).
+            onSelect = function(data)
+                TriggerEvent('vehiclemods:client:openVehicleModMenu', data and data.entity)
+            end,
+        },
+    })
+end
+
+-- Event-driven registration (no unbounded poll): register now if ox_target is
+-- already up, otherwise when it starts. fxmanifest also declares the dependency.
+if GetResourceState('ox_target') == 'started' then
+    RegisterEvmTarget()
+end
+AddEventHandler('onClientResourceStart', function(res)
+    if res == 'ox_target' then RegisterEvmTarget() end
+end)
