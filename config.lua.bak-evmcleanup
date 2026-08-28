@@ -29,6 +29,10 @@ Config.DisableZoneRestrictions = true  -- DSRP 2026-08-22: zones OFF — emergen
 -- table with a generic list, silently dropping saspr/statepolice/trooper from
 -- police and the whole mechanic group, so those jobs failed authorization even
 -- though they are listed here.
+-- Driving into a modification zone used to force the menu open, and re-open it
+-- every couple of seconds while you stayed there. Off by default; use /modveh or F7.
+Config.AutoOpenMenuInZone = false -- DEAD FLAG: auto-open code removed 2026-08-22; zones grant access only, never open the menu
+
 Config.ManualJobSystem = true
 
 -- Job name mappings (add your custom job names here)

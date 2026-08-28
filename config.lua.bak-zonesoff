@@ -22,13 +22,17 @@ Config.JobCacheTimeout = 300000       -- 5 minutes cache duration (ms)
 -----------------------------------------------------------
 Config.EnableJobRestrictions = true    -- DSRP: emergency-job restriction ON (enforced server-side)
 Config.EnableGradeRestrictions = false -- Enable grade/rank requirements
-Config.DisableZoneRestrictions = true  -- DSRP 2026-08-22: zones OFF — emergency jobs may modify anywhere (job check still enforced server-side)
+Config.DisableZoneRestrictions = false -- DSRP: zone checks ON (enforced server-side)
 
 -- Keep the hand-authored mappings below. Without this flag,
 -- Config.AutoConfigureJobSystem() runs during Initialize and OVERWRITES this
 -- table with a generic list, silently dropping saspr/statepolice/trooper from
 -- police and the whole mechanic group, so those jobs failed authorization even
 -- though they are listed here.
+-- Driving into a modification zone used to force the menu open, and re-open it
+-- every couple of seconds while you stayed there. Off by default; use /modveh or F7.
+Config.AutoOpenMenuInZone = false
+
 Config.ManualJobSystem = true
 
 -- Job name mappings (add your custom job names here)

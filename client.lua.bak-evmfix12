@@ -49,6 +49,9 @@ local TEXTURE_LOAD_TIMEOUT = 300
 local loadedTextures = {}
 
 -- Command to open the vehicle modification menu
+-- one notification per zone entry, cleared when you leave (declared up here on
+-- purpose: state before the code that touches it)
+zoneNotified = {}
 
 RegisterCommand('modveh', function()
     local playerCoords = GetEntityCoords(PlayerPedId())
@@ -121,7 +124,7 @@ ActiveCustomLiveries = {}
 
 -- Main menu event
 RegisterNetEvent('vehiclemods:client:openVehicleModMenu')
-AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
+AddEventHandler('vehiclemods:client:openVehicleModMenu', function()
     -- SERVER-SIDE AUTHORIZATION GATE (single choke point for every entry path:
     -- /modveh command, F7 keybind, auto-open zone thread, and submenu re-opens).
     -- The server re-checks emergency job + real zone distance; the client cannot
@@ -137,29 +140,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         return
     end
 
-    -- Resolve the subject vehicle: the ox_target entity (on foot) or the one the
-    -- player is sitting in. Guard against 0 so submenus never run natives on a null
-    -- entity, and enforce EmergencyVehiclesOnly HERE so no entry path can skip it.
-    local vehicle = targetVehicle
-    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
-        vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-    end
-    if vehicle == 0 then
-        lib.notify({ title = 'Vehicle Modification',
-            description = 'Get in or stand beside the vehicle to modify it.',
-            type = 'error', duration = 5000 })
-        return
-    end
-    if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(vehicle) then
-        local adminBypass = lib.callback.await('dps-EVM:server:isAdmin', false)
-        if not adminBypass then
-            lib.notify({ title = 'Vehicle Not Authorized',
-                description = 'Only emergency vehicles can be modified here',
-                type = 'error', duration = 5000 })
-            return
-        end
-    end
-
+    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
     local vehicleTitle = "Vehicle Menu"
     local vehicleInfo = nil
 
@@ -3563,7 +3544,8 @@ end
 -- vehicle you are standing at, inside a zone, so the interaction belongs on the
 -- vehicle rather than on a function key competing with everything else.
 -- ---------------------------------------------------------------------------
-local function RegisterEvmTarget()
+CreateThread(function()
+    while GetResourceState('ox_target') ~= 'started' do Wait(500) end
     exports.ox_target:addGlobalVehicle({
         {
             name     = 'dps_evm_modify',
@@ -3572,27 +3554,15 @@ local function RegisterEvmTarget()
             distance = 3.0,
             canInteract = function(entity)
                 if not entity or not DoesEntityExist(entity) then return false end
-                -- Only surface on emergency vehicles when the restriction is on,
-                -- so the option is not drawn on every civilian car in the world.
-                if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(entity) then
-                    return false
-                end
-                return true
+                local ped = cache and cache.ped
+                if not ped or ped == 0 then return false end
+                local inZone = Config.IsInModificationZone and
+                    Config.IsInModificationZone(GetEntityCoords(ped))
+                return inZone and true or false
             end,
-            -- Pass the TARGETED vehicle through; the handler no longer relies on
-            -- GetVehiclePedIsIn (which is 0 when standing beside the vehicle).
-            onSelect = function(data)
-                TriggerEvent('vehiclemods:client:openVehicleModMenu', data and data.entity)
+            onSelect = function()
+                TriggerEvent('vehiclemods:client:openVehicleModMenu')
             end,
         },
     })
-end
-
--- Event-driven registration (no unbounded poll): register now if ox_target is
--- already up, otherwise when it starts. fxmanifest also declares the dependency.
-if GetResourceState('ox_target') == 'started' then
-    RegisterEvmTarget()
-end
-AddEventHandler('onClientResourceStart', function(res)
-    if res == 'ox_target' then RegisterEvmTarget() end
 end)

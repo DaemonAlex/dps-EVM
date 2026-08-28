@@ -299,19 +299,14 @@ end
 -- Is this player employed in an authorized emergency job?
 local function IsPlayerAuthorized(src)
     if not Config.EnableJobRestrictions then return true end
-    -- Resolve the player FIRST: an admin still on the multichar screen has no
-    -- loaded Player, and letting them past here crashes downstream handlers
-    -- (savePreset/GetPlayerJob) on a nil job. Admin bypass requires a loaded player.
     local jobName = GetAuthJobName(src)
     if not jobName then return false end
-    if IsPlayerAceAllowed(src, 'command') then return true end  -- server owner / admins, any job
     return GetEmergencyJobSet()[jobName] == true
 end
 
 -- Server-authoritative zone check using the player's REAL ped coords
 local function IsPlayerInModZone(src)
-    if Config.DisableZoneRestrictions then return true end  -- config fast-path first
-    if IsPlayerAceAllowed(src, 'command') then return true end  -- admins skip position check
+    if Config.DisableZoneRestrictions then return true end
     local ped = GetPlayerPed(src)
     if not ped or ped == 0 then return false end
     local coords = GetEntityCoords(ped)
@@ -1389,24 +1384,3 @@ AddEventHandler('vehiclemods:server:chargeRepair', function(repairType, cost)
     end
 end)
 
-
--- Character switch (logout without disconnect) must also drop the job cache;
--- source ids survive multichar switches, so a stale entry would gate the new
--- character with the old character's job. Same bug class as dps-towjob 2026-08-22.
--- Character-switch (multichar) cache invalidation. NO RegisterNetEvent: these are
--- server-internal framework events; net-registering one would let any client forge a
--- logout for an arbitrary player id server-wide. AddEventHandler alone receives the
--- genuine server-side trigger.
-AddEventHandler('QBCore:Server:OnPlayerUnload', function(src)
-    if type(src) == 'number' then InvalidatePlayerJobCache(src) end
-end)
-AddEventHandler('qbx_core:server:playerLoggedOut', function(src)
-    if type(src) == 'number' then InvalidatePlayerJobCache(src) end
-end)
-
-
--- lets the client skip zone/vehicle-class prompts for admins; server-side
--- checks above stay authoritative either way
-lib.callback.register('dps-EVM:server:isAdmin', function(source)
-    return IsPlayerAceAllowed(source, 'command') == true
-end)
