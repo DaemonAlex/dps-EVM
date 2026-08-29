@@ -284,8 +284,11 @@ local function GetAuthJobName(src)
 end
 
 -- Build the set of authorized emergency job names from config mappings
--- (police + fire + ambulance groups; custom names like lspd/bcso included)
+-- (police + fire + ambulance groups). Memoized: JobMappings is static after
+-- init and this runs on every auth check.
+local emergencyJobSetCache = nil
 local function GetEmergencyJobSet()
+    if emergencyJobSetCache then return emergencyJobSetCache end
     local set = {}
     for _, group in ipairs({'police', 'fire', 'ambulance'}) do
         local names = Config.JobMappings and Config.JobMappings[group]
@@ -293,6 +296,7 @@ local function GetEmergencyJobSet()
             for _, n in ipairs(names) do set[n] = true end
         end
     end
+    emergencyJobSetCache = set
     return set
 end
 
@@ -816,8 +820,15 @@ local function HasRequiredItem(playerId, items)
                 end
             end
         end
-    elseif currentFramework == 'qbox' and frameworkObject then
-        -- QBox uses ox_inventory typically
+    elseif currentFramework == 'qbox' then
+        -- QBox uses ox_inventory (frameworkObject is nil on this build, so
+        -- the old `and frameworkObject` guard made this branch unreachable —
+        -- it only worked by falling through to the standalone else).
+        -- Keep the resource-state guard that fallback provided: if ox_inventory
+        -- isn't running (e.g. mid-restart), allow rather than throw on the export.
+        if GetResourceState('ox_inventory') ~= 'started' then
+            return true, items[1]
+        end
         for _, itemName in ipairs(items) do
             local hasItem = exports.ox_inventory:GetItemCount(playerId, itemName)
             if hasItem and hasItem > 0 then
@@ -908,29 +919,68 @@ AddEventHandler('vehiclemods:server:requestFieldRepair', function()
         end
     end
 
-    -- Check for required item
+    -- Check for required item — PRESENCE only. Payment, kit consumption and
+    -- the cooldown all happen in completeFieldRepair below, AFTER the client's
+    -- progress bar finishes: canceling costs nothing, and a failed payment
+    -- can't eat the kit. (Review catch 2026-08-28.)
     if cfg.requireItem then
-        local hasItem, itemName = HasRequiredItem(src, cfg.alternativeItems or {cfg.itemName})
+        local hasItem = HasRequiredItem(src, cfg.alternativeItems or {cfg.itemName})
         if not hasItem then
             TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, false,
                 'You need a repair kit to perform field repairs')
             return
         end
-
-        -- Consume item if configured
-        if cfg.consumeItem then
-            RemoveItem(src, itemName)
-        end
     end
 
-    -- Set cooldown and approve repair
-    fieldRepairCooldowns[src] = currentTime
+    -- Approved: the client runs the progress bar, then calls completeFieldRepair
     TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, true, nil, cfg.maxEngineRepair, cfg.repairTime)
 
     if Config.Debug then
         print(("^2[FIELD-REPAIR]:^0 Player %s approved for field repair (Job: %s, Grade: %d)"):format(
             src, playerJob or "unknown", playerGrade))
     end
+end)
+
+-- Phase 2 of field repair: the client's progress bar finished. Re-validate,
+-- charge, consume the kit and start the cooldown — completion-only, so a
+-- canceled repair costs nothing.
+lib.callback.register('vehiclemods:server:completeFieldRepair', function(src)
+    local cfg = Config.FieldRepair
+    if not cfg or not cfg.enabled then return false, 'Field repair is disabled' end
+
+    -- Cooldown re-check (guards double completion)
+    local currentTime = os.time()
+    if fieldRepairCooldowns[src] and (currentTime - fieldRepairCooldowns[src]) < (cfg.cooldown / 1000) then
+        return false, 'Field repair on cooldown'
+    end
+
+    -- Job re-check
+    if cfg.allowedJobs and #cfg.allowedJobs > 0 then
+        local playerJob = GetPlayerJob(src)
+        local jobAllowed = false
+        for _, allowedJob in ipairs(cfg.allowedJobs) do
+            if playerJob == allowedJob then jobAllowed = true break end
+        end
+        if not jobAllowed then return false, 'Your job does not allow field repairs' end
+    end
+
+    -- Kit must still be present
+    local itemToConsume = nil
+    if cfg.requireItem then
+        local hasItem, itemName = HasRequiredItem(src, cfg.alternativeItems or {cfg.itemName})
+        if not hasItem then return false, 'Repair kit no longer available' end
+        itemToConsume = itemName
+    end
+
+    local paid, payMsg = ChargeForRepair(src, 'field')
+    if not paid then return false, payMsg or 'Payment failed' end
+
+    if itemToConsume and cfg.consumeItem then
+        RemoveItem(src, itemToConsume)
+    end
+
+    fieldRepairCooldowns[src] = currentTime
+    return true
 end)
 
 -----------------------------------------------------------
@@ -1061,6 +1111,12 @@ end)
 RegisterNetEvent('vehiclemods:server:loadPresets')
 AddEventHandler('vehiclemods:server:loadPresets', function(vehicleModel)
     local src = source
+
+    -- Read-only, but still gate it: no reason unauthorized jobs should be able
+    -- to enumerate fleet presets, and a bad vehicleModel type threw on :lower().
+    if not IsPlayerAuthorized(src) then return end
+    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 64 then return end
+
     local identifier = GetPlayerIdentifier(src)
     local playerJob = GetPlayerJob(src)
 
@@ -1295,21 +1351,18 @@ local function GetRepairDiscount(playerId)
     return 0
 end
 
--- Handle repair payment request
-RegisterNetEvent('vehiclemods:server:chargeRepair')
-AddEventHandler('vehiclemods:server:chargeRepair', function(repairType, cost)
-    local src = source
+-- Charge a player for a repair. Cost is derived SERVER-SIDE from config (never
+-- trusted from the client); free jobs and job discounts apply. Returns
+-- (ok:boolean, msg:string|nil). Shared by the repair callback below and the
+-- field-repair flow.
+function ChargeForRepair(src, repairType)  -- resource-global: field repair (defined earlier in the file) calls this at runtime
     local cfg = Config.RepairCosts
 
-    -- If repair costs disabled, allow free
+    -- Repair costs disabled -> free
     if not cfg or not cfg.enabled then
-        TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, true)
-        return
+        return true
     end
 
-    -- H3 FIX: derive cost SERVER-SIDE from config. The client-supplied `cost`
-    -- is ignored (a malicious client could send 0/negative). Damage-scaling is
-    -- intentionally not trusted from the client; base cost per repair type is used.
     local serverCostByType = {
         full = cfg.fullRepairCost or 0,
         emergency = cfg.emergencyRepairCost or 0,
@@ -1317,35 +1370,23 @@ AddEventHandler('vehiclemods:server:chargeRepair', function(repairType, cost)
     }
     local baseCost = serverCostByType[repairType]
     if baseCost == nil then
-        -- Unknown repair type -> reject
-        TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, false, 'Invalid repair type')
-        return
+        return false, 'Invalid repair type'
     end
-    if Config.Debug and type(cost) == 'number' and cost ~= baseCost then
-        print(("^3[REPAIR-COST]:^0 Ignoring client cost %s; using server cost %d for %s"):format(tostring(cost), baseCost, tostring(repairType)))
-    end
-    cost = baseCost
 
-    -- Check jg-scripts compatibility (defer to jg-mechanic for repairs)
+    -- jg-scripts compatibility (defer to jg-mechanic for repairs).
+    -- Disabled in config on DPS: no jg resources installed.
     local jgCompat = Config.Compatibility and Config.Compatibility['jg-scripts']
     if jgCompat and jgCompat.enabled and jgCompat.deferToMechanicForRepairs then
-        TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, true)
-        if Config.Debug then
-            print(("^2[COMPAT]:^0 Skipping repair charge (jg-mechanic handles economy)"))
-        end
-        return
+        return true
     end
 
-    -- Apply job discount
     local discount = GetRepairDiscount(src)
-    local finalCost = math.floor(cost * (1 - discount))
+    local finalCost = math.floor(baseCost * (1 - discount))
 
     if finalCost <= 0 then
-        TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, true)
-        return
+        return true
     end
 
-    -- Try to charge from configured source
     local chargeFrom = cfg.chargeFrom or 'bank'
     local success = false
     local chargedFrom = nil
@@ -1372,21 +1413,32 @@ AddEventHandler('vehiclemods:server:chargeRepair', function(repairType, cost)
     end
 
     if success then
-        TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, true)
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'Repair Payment',
             description = ('$%d charged from %s'):format(finalCost, chargedFrom),
             type = 'success',
             duration = 3000
         })
-
         if Config.Debug then
             print(("^2[REPAIR-COST]:^0 Player %s charged $%d for %s repair"):format(src, finalCost, repairType))
         end
-    else
-        TriggerClientEvent('vehiclemods:client:repairPaymentResult', src, false,
-            ('Insufficient funds. Need $%d'):format(finalCost))
+        return true
     end
+
+    return false, ('Insufficient funds. Need $%d'):format(finalCost)
+end
+
+-- ox_lib callback the client awaits before starting Emergency/Full repair.
+-- (Replaces the old 'vehiclemods:server:chargeRepair' net event + the
+-- 'repairPaymentResult' reply event, which the client never actually used —
+-- repairs had been silently free.)
+lib.callback.register('vehiclemods:server:chargeRepair', function(src, repairType)
+    if not CanModifyVehicles(src) then
+        return false, 'You are not authorized to repair vehicles here.'
+    end
+    -- No type guard needed: ChargeForRepair's cost-table lookup rejects any
+    -- non-matching repairType with the same (false, 'Invalid repair type').
+    return ChargeForRepair(src, repairType)
 end)
 
 

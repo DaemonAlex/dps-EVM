@@ -284,7 +284,7 @@ Look for these messages in console:
 1. Join server with emergency job (Grade 4+)
 2. Go to Mission Row Police Department garage
 3. Enter an emergency vehicle
-4. Press F7 or `/modveh` to open menu
+4. Target the vehicle (ox_target) or type `/evm` to open the menu
 5. Verify all modification options work
 
 ### **3. Job Testing**

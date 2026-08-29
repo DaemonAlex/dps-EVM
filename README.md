@@ -139,10 +139,12 @@ Config.ManualEmergencyVehicles = {
 - **Custom Grades** - Fully configurable per-zone requirements
 
 ### **Job Mapping System**
-Automatically handles job variations:
-- **Police**: `police`, `lspd`, `bcso`, `sahp`, `sheriff`
-- **Fire**: `fire`, `lsfd`, `firefighter`
-- **Ambulance**: `ambulance`, `ems`, `medical`
+Job names must match the server's `qbx_core/shared/jobs.lua`. On DPS
+(2026-08-28) the authorized jobs are:
+- **Police group** (all six LEO agencies): `police` (LSPD), `bcso`, `sasp`, `fib`, `doc`, `dfw`
+- **Fire**: `lsfd`
+- **Ambulance**: `ambulance`
+- **Mechanic**: no menu access; free repairs come from `Config.RepairCosts.freeForJobs`
 
 ## 🗄️ **Database Integration**
 
@@ -159,9 +161,9 @@ Automatically handles job variations:
 
 ## 🎮 **Commands & Controls**
 
-- **`/modveh`** - Open modification menu (in designated zones)
-- **`F7`** - Default keybind (customizable)
-- **`E`** - Context interaction at modification zones
+- **`/evm`** - Open the Emergency Vehicle Menu (replaces the old `/modveh`, which is removed)
+- **ox_target** - Target any emergency vehicle → "Vehicle Modification" (the primary path; works on foot beside the vehicle)
+- **Keybind** - Unbound by default; `/evm` can be bound in FiveM keybind settings
 
 ## 📱 **Smart Notifications**
 

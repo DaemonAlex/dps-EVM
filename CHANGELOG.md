@@ -2,6 +2,91 @@
 
 All notable changes to the Emergency Vehicle Menu project will be documented in this file.
 
+## [2.4.0] - 2026-08-28 - **DPS Job Audit, /evm, On-Foot Fix & Repair Economy**
+
+### 🚨 Fixed
+- **Job tables now match the real server.** `Config.JobMappings` and
+  `Config.FieldRepair.allowedJobs` carried names that don't exist on DPS
+  (`sahp`, `saspr`, `statepolice`, `trooper`, `lspd`, `sheriff`, `fire`, `ems`)
+  and were missing four real agencies — SASP, FIB, DOC and DFW troopers/agents/
+  officers/wardens could not open the menu at all. Authorized jobs are now the
+  six LEO agencies (`police`, `bcso`, `sasp`, `fib`, `doc`, `dfw`) plus `lsfd`
+  and `ambulance`, matching `qbx_core/shared/jobs.lua`.
+- **On-foot ox_target flow works everywhere — submenus AND repairs.** Every
+  submenu re-called `GetVehiclePedIsIn`, which is 0 when standing beside the
+  vehicle, so Liveries/Colors/Extras/etc. all errored on foot. Submenus now use
+  the menu's subject vehicle (`GetMenuVehicle()`), and all three repair flows
+  (Emergency/Full/Field) accept the targeted vehicle too — the exit-vehicle /
+  warp-back-in choreography only runs when the player was actually inside.
+  The ped-based lookup is kept only where it is correct (auto-apply on entry).
+- **Menu round-trips no longer strand the on-foot flow.** Submenu Back buttons
+  and post-repair returns re-open the menu with no vehicle argument; that used
+  to resolve to 0 on foot and close the menu with an error. The open handler
+  now falls back to the current menu-session vehicle. (Caught in code review.)
+- **Field-repair item check can't throw mid-restart.** The qbox branch of
+  `HasRequiredItem` now guards `GetResourceState('ox_inventory')` before using
+  the export, matching the old fallback's behavior. (Caught in code review.)
+- **Repairs actually charge now.** `Config.RepairCosts` was enabled but the
+  client never called the payment path — every repair was silently free. The
+  jg-scripts compat flag also short-circuited all charges for a jg-mechanic
+  that is not installed on this server (now disabled). Emergency/Full repair
+  charge through a new `vehiclemods:server:chargeRepair` ox_lib callback
+  (server-derived cost, mechanic-free, 25% emergency-job discount); field
+  repair charges before the kit is consumed.
+
+### 🔄 Changed
+- **Command renamed: `/modveh` → `/evm`** (old command removed). Keybind entry
+  renamed accordingly; still unbound by default — ox_target on the vehicle is
+  the primary path.
+- Repair discount list rebuilt for the real DPS jobs; `lscustoms` (nonexistent)
+  dropped from free-repair jobs.
+
+### 🧹 Removed (dead code)
+- Client `GetRepairCost`/`RequestRepairPayment` (never called; the latter leaked
+  a net-event handler per call), the zone-defaults family
+  (`GetCurrentZoneDefaults`/`GetPriorityExtras`/`ShouldShowNeon`/
+  `GetZoneSuggestedColors` — zones were removed 2026-08-22), the unused
+  `DisplayHelpTextThisFrame`, the wrong-resource qbx branch in client framework
+  init, and the unreachable qbox branch in server `HasRequiredItem`.
+- Server `vehiclemods:server:chargeRepair` net event + `repairPaymentResult`
+  reply event (replaced by the callback above).
+- "Golden Shower" neon color renamed "Gold".
+
+### 💰 Economy correctness (review round 2)
+- **No pay-for-cancel.** Emergency/Full repairs now charge only AFTER the
+  cancelable progress stages complete; Full repair's mid-stage incremental
+  fixes are gone (they applied real repairs before payment). Field repair is
+  two-phase: approval validates only, and payment + kit consumption + cooldown
+  happen in a completion callback after the progress bar finishes.
+- Dead `scaleCostByDamage`/`maxCostMultiplier` config keys removed (their only
+  consumer was the deleted client-side cost path).
+- Both compat blocks fully disarmed: `deferToMechanicForRepairs = false` so
+  re-enabling a compat block can never silently make repairs free again.
+
+### ⚡ Perf & correctness (review round 2)
+- `GetMenuVehicle()` prefers the vehicle the player is actually in; the stored
+  menu subject only serves the on-foot flow (no stale-vehicle wins).
+- All native-touching submenus guard against a missing vehicle.
+- Admin status cached client-side (one callback per session instead of one per
+  non-emergency target); server's emergency-job set memoized.
+- Inert `mechanic` entries removed from `JobMappings`/`FieldRepair.allowedJobs`
+  (menu access is emergency-only; mechanic pricing lives in `freeForJobs`).
+
+### ✨ UI Polish
+- Every menu option now carries an appropriate icon (main menu, appearance,
+  colors, neon, wheels); Extras and Doors show live state icons
+  (`toggle-on/off`, `door-open/closed`).
+- "No X available" rows are proper disabled info rows (`circle-info`) instead
+  of clickable no-ops.
+- Menus render in the DPS coastal-dusk house theme via the server's patched
+  ox_lib build — no per-script styling needed.
+
+### 🔒 Hardened
+- `loadPresets` now requires an authorized job and validates `vehicleModel`
+  before touching the database.
+- Dormant `AutoConfigureJobSystem` job list aligned with the real server jobs
+  so flipping `ManualJobSystem` off can never reintroduce the lockout bug.
+
 ## [2.3.0] - 2026-08-12 - **DSRP Security & Qbox Framework Hardening**
 
 Private DelPerro Sands RP fork. Fixes a broken Qbox server framework layer and
