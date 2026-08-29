@@ -31,12 +31,18 @@ Config.DisableZoneRestrictions = true  -- DSRP 2026-08-22: zones OFF — emergen
 -- though they are listed here.
 Config.ManualJobSystem = true
 
--- Job name mappings (add your custom job names here)
+-- Job name mappings — MUST match qbx_core/shared/jobs.lua on this server.
+-- DPS runs six LEO agencies (2026-08-28 audit): police (LSPD), bcso, sasp,
+-- fib, doc, dfw. Fire+EMS are lsfd and ambulance. The old list carried names
+-- that don't exist here (sahp/saspr/statepolice/trooper/lspd/sheriff), which
+-- locked SASP/FIB/DOC/DFW out of the menu entirely.
+-- NOTE: no mechanic group here on purpose — JobMappings drives MENU access
+-- (police+fire+ambulance groups only). Mechanic repair pricing comes from
+-- Config.RepairCosts.freeForJobs, which is a separate list.
 Config.JobMappings = {
-    police = {'police', 'lspd', 'bcso', 'sheriff', 'sahp', 'saspr', 'statepolice', 'trooper'},
-    fire = {'fire', 'lsfd', 'firefighter'},
-    ambulance = {'ambulance', 'ems', 'medical'},
-    mechanic = {'mechanic', 'lscustoms', 'bennys'}
+    police = {'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw'},
+    fire = {'lsfd'},
+    ambulance = {'ambulance'}
 }
 
 -----------------------------------------------------------
@@ -301,11 +307,14 @@ function Config.AutoConfigureJobSystem()
         }
     }
     
-    -- Auto-detect job names based on framework
+    -- Auto-detect job names based on framework.
+    -- DORMANT on DPS (Config.ManualJobSystem = true skips this function), but
+    -- kept aligned with the real server jobs so flipping that flag can never
+    -- silently reintroduce the locked-out-agencies bug.
     Config.JobMappings = {
-        police = {"police", "lspd", "bcso", "sahp", "sheriff"},
-        fire = {"fire", "lsfd", "firefighter"},
-        ambulance = {"ambulance", "ems", "medical"}
+        police = {"police", "bcso", "sasp", "fib", "doc", "dfw"},
+        fire = {"lsfd"},
+        ambulance = {"ambulance"}
     }
     
     if Config.Debug then
@@ -472,9 +481,12 @@ Config.EmergencyVehiclesOnly = true   -- DSRP: only emergency vehicles may be mo
 -----------------------------------------------------------
 Config.Compatibility = {
     -- jg-mechanic / jg-advancedgarages
+    -- DISABLED 2026-08-28: no jg-* resources exist on this server, and with this
+    -- on, deferToMechanicForRepairs made EVERY repair free for a mechanic script
+    -- that isn't installed. Re-enable only if jg-mechanic is actually added.
     ['jg-scripts'] = {
-        enabled = true,                     -- Enable jg-scripts compatibility
-        deferToMechanicForRepairs = true,   -- Don't charge for repairs (let jg-mechanic handle economy)
+        enabled = false,                    -- Enable jg-scripts compatibility
+        deferToMechanicForRepairs = false,  -- ALSO disarmed: with this true, re-enabling the block silently made every repair free again
         respectGarageLivery = true,         -- Don't auto-apply livery if garage just set it
         garageSpawnGracePeriod = 5000       -- ms to wait after spawn before auto-applying livery
     },
@@ -482,7 +494,7 @@ Config.Compatibility = {
     -- qb-mechanicjob / qb-garages
     ['qb-scripts'] = {
         enabled = false,
-        deferToMechanicForRepairs = true,
+        deferToMechanicForRepairs = false,  -- disarmed for the same reason as jg-scripts
         respectGarageLivery = true
     },
 
@@ -529,19 +541,23 @@ Config.RepairCosts = {
     emergencyRepairCost = 200,         -- Quick patch-up
     fieldRepairCost = 350,             -- Field repair (higher to encourage station use)
 
-    -- Scaling
-    scaleCostByDamage = true,          -- More damage = higher cost
-    maxCostMultiplier = 2.5,           -- Cap at 2.5x base cost
+    -- (scaleCostByDamage / maxCostMultiplier removed 2026-08-28: damage-scaled
+    -- pricing was computed client-side and is not trusted — the server charges
+    -- flat per-type base costs.)
 
-    -- Job-based pricing
+    -- Job-based pricing (real DPS jobs only)
     freeForJobs = {
-        'mechanic',                    -- Mechanics repair free
-        'lscustoms'
+        'mechanic'                     -- Mechanics repair free
     },
     discountJobs = {
-        {job = 'police', discount = 0.25},    -- 25% off for police
-        {job = 'ambulance', discount = 0.25}, -- 25% off for EMS
-        {job = 'fire', discount = 0.25}       -- 25% off for fire
+        {job = 'police', discount = 0.25},
+        {job = 'bcso', discount = 0.25},
+        {job = 'sasp', discount = 0.25},
+        {job = 'fib', discount = 0.25},
+        {job = 'doc', discount = 0.25},
+        {job = 'dfw', discount = 0.25},
+        {job = 'lsfd', discount = 0.25},
+        {job = 'ambulance', discount = 0.25}
     }
 }
 
@@ -591,8 +607,10 @@ Config.FieldRepair = {
     alternativeItems = {               -- Alternative items that work
         'repairkit', 'toolkit', 'mechanickit', 'advanced_repairkit'
     },
-    allowedJobs = {                    -- Jobs that can use field repair
-        'police', 'ambulance', 'fire', 'mechanic', 'lspd', 'bcso', 'sahp', 'ems', 'lsfd'
+    allowedJobs = {                    -- Jobs that can use field repair (real DPS jobs only;
+                                       -- no mechanic: field repair is reached through the menu,
+                                       -- which is emergency-jobs-only)
+        'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'lsfd', 'ambulance'
     },
     minGrade = 0,                      -- Minimum job grade (0 = any grade)
     maxEngineRepair = 350.0,           -- Max engine health from field repair (see Constants.ENGINE_MAX_FIELD_REPAIR)

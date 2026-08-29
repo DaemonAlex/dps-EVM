@@ -19,12 +19,15 @@ AddEventHandler('onClientResourceStart', function(resourceName)
         ESX = exports['es_extended']:getSharedObject()
         print("^2INFO:^0 ESX initialized")
     elseif framework == 'qbcore' then
+        -- Legacy QB-Core only. (The old qbx_core branch here called the
+        -- qb-core export against the wrong resource — on a qbx box the
+        -- framework detects as 'qbox' and never lands here.)
         if GetResourceState('qb-core') == 'started' then
             QBCore = exports['qb-core']:GetCoreObject()
-        elseif GetResourceState('qbx_core') == 'started' then
-            QBCore = exports['qb-core']:GetCoreObject()
+            print("^2INFO:^0 QBCore initialized")
+        else
+            print("^3WARN:^0 Framework set to qbcore but qb-core is not started")
         end
-        print("^2INFO:^0 QBCore initialized")
     elseif framework == 'qbox' then
         -- QBox uses exports directly, no need to get core object
         print("^2INFO:^0 QBox framework detected")
@@ -48,71 +51,49 @@ end
 local TEXTURE_LOAD_TIMEOUT = 300
 local loadedTextures = {}
 
--- Command to open the vehicle modification menu
-
-RegisterCommand('modveh', function()
-    local playerCoords = GetEntityCoords(PlayerPedId())
-    local inZone, zoneInfo = Config.IsInModificationZone(playerCoords)
-    local adminBypass = lib.callback.await('dps-EVM:server:isAdmin', false)
-    if adminBypass then
-        inZone = true
-        zoneInfo = { message = 'Admin: open anywhere' }
-    end
-    
-    if not inZone then
-        lib.notify({
-            title = 'Access Denied',
-            description = zoneInfo.message,
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-    
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Error',
-            description = 'You must be in a vehicle to use this menu',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    -- Check if vehicle is an emergency vehicle (if restriction is enabled)
-    if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(vehicle) and not adminBypass then
-        lib.notify({
-            title = 'Vehicle Not Authorized',
-            description = 'Only emergency vehicles can be modified here',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    print("^2SUCCESS:^0 " .. zoneInfo.message .. ". Opening menu...")
+-- /evm opens the menu. All authorization (job, zone, emergency-class, admin
+-- bypass) lives in the openVehicleModMenu event handler + server callbacks —
+-- the command adds no checks of its own, so every entry path behaves the same.
+RegisterCommand('evm', function()
     TriggerEvent('vehiclemods:client:openVehicleModMenu')
 end, false)
 
--- Display help text function
-function DisplayHelpTextThisFrame(text, beep)
-    SetTextComponentFormat("STRING")
-    AddTextComponentString(text)
-    DisplayHelpTextFromStringLabel(0, 0, 1, -1)
-end
-
--- Add a keybind to quickly open the menu without typing the command
--- F7 released to klb_exhaustaudio, which had the same default and is a global
--- tool. EVM is contextual (you must be beside a vehicle inside a modification
--- zone), so it is reached by targeting the vehicle instead. The empty default
--- leaves /modveh bindable by hand in FiveM's keybind settings for anyone who
--- prefers a key.
-RegisterKeyMapping('modveh', 'Open Vehicle Modification Menu', 'keyboard', '')
+-- Keybind stays unbound by default: F7 belongs to klb_exhaustaudio, and EVM is
+-- contextual (target the vehicle via ox_target). /evm is bindable by hand in
+-- FiveM's keybind settings for anyone who prefers a key.
+RegisterKeyMapping('evm', 'Open Emergency Vehicle Menu (EVM)', 'keyboard', '')
 
 -- Initialize variables
 ActiveCustomLiveries = {}
+
+-- The vehicle the menu was opened for. Set by openVehicleModMenu after the
+-- server-side auth gate. Submenus MUST use GetMenuVehicle() instead of
+-- GetVehiclePedIsIn: when the menu is reached on foot via ox_target,
+-- GetVehiclePedIsIn returns 0 and every submenu used to error with
+-- "You need to be in a vehicle".
+local MenuVehicle = 0
+
+-- Admin (ace 'command') status is static for the session — cache the first
+-- answer instead of a server round trip on every non-emergency target.
+local isAdminCache = nil
+local function IsAdminCached()
+    if isAdminCache == nil then
+        isAdminCache = lib.callback.await('dps-EVM:server:isAdmin', false) == true
+    end
+    return isAdminCache
+end
+
+function GetMenuVehicle()
+    -- The vehicle the player is IN always wins (review catch: a lingering menu
+    -- subject must never beat the car you're actually sitting in); the stored
+    -- menu subject only covers the on-foot ox_target flow.
+    local veh = GetVehiclePedIsIn(PlayerPedId(), false)
+    if veh ~= 0 then return veh end
+    if MenuVehicle ~= 0 and DoesEntityExist(MenuVehicle) then
+        return MenuVehicle
+    end
+    return 0
+end
 
 -- Zone feature removed entirely (Damon 2026-08-22): access is JOB-gated
 -- (police/fire/EMS via server checks). No zone blips, no zone scanning.
@@ -144,6 +125,12 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
     if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
         vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
     end
+    -- Re-opens (submenu Back buttons, post-repair returns) fire this event with
+    -- no argument. On foot that used to resolve to 0 and close the menu — fall
+    -- back to the vehicle this menu session is already about.
+    if vehicle == 0 and MenuVehicle ~= 0 and DoesEntityExist(MenuVehicle) then
+        vehicle = MenuVehicle
+    end
     if vehicle == 0 then
         lib.notify({ title = 'Vehicle Modification',
             description = 'Get in or stand beside the vehicle to modify it.',
@@ -151,7 +138,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         return
     end
     if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(vehicle) then
-        local adminBypass = lib.callback.await('dps-EVM:server:isAdmin', false)
+        local adminBypass = IsAdminCached()
         if not adminBypass then
             lib.notify({ title = 'Vehicle Not Authorized',
                 description = 'Only emergency vehicles can be modified here',
@@ -159,6 +146,8 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
             return
         end
     end
+
+    MenuVehicle = vehicle
 
     local vehicleTitle = "Vehicle Menu"
     local vehicleInfo = nil
@@ -186,6 +175,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Liveries',
             description = 'Select a vehicle livery.',
+            icon = 'brush',
             onSelect = function()
                 OpenLiveryMenu()
             end
@@ -196,6 +186,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Custom Liveries',
             description = 'Apply custom YFT liveries.',
+            icon = 'palette',
             onSelect = function()
                 OpenCustomLiveriesMenu()
             end
@@ -206,6 +197,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Vehicle Appearance',
             description = 'Customize vehicle appearance.',
+            icon = 'spray-can',
             onSelect = function()
                 OpenAppearanceMenu()
             end
@@ -216,6 +208,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Performance Mods',
             description = 'Install performance upgrades.',
+            icon = 'gauge-high',
             onSelect = function()
                 OpenPerformanceMenu()
             end
@@ -226,6 +219,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Extras',
             description = 'Enable or disable vehicle extras.',
+            icon = 'toggle-on',
             onSelect = function()
                 OpenExtrasMenu()
             end
@@ -236,6 +230,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Doors',
             description = 'Open or close individual doors.',
+            icon = 'door-open',
             onSelect = function()
                 OpenDoorsMenu()
             end
@@ -279,6 +274,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Emergency Repair',
             description = 'Partial repair for disabled vehicles (slow movement only)',
+            icon = 'wrench',
             onSelect = function()
                 EmergencyRepairVehicle()
             end
@@ -287,6 +283,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
         table.insert(options, {
             title = 'Full Repair',
             description = 'Complete vehicle repair and performance restoration',
+            icon = 'screwdriver-wrench',
             onSelect = function()
                 FullRepairVehicle()
             end
@@ -308,6 +305,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
     table.insert(options, {
         title = 'Save Configuration',
         description = 'Save current vehicle setup.',
+        icon = 'floppy-disk',
         onSelect = function()
             SaveVehicleConfig()
         end
@@ -316,6 +314,7 @@ AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
     table.insert(options, {
         title = 'Close Menu',
         description = 'Exit the vehicle modification menu',
+        icon = 'xmark',
         onSelect = function()
             lib.hideContext()
         end
@@ -336,12 +335,12 @@ local LIVERIES_PER_PAGE = 20  -- Prevents frame drops with 50+ liveries
 
 function OpenLiveryMenu(page)
     page = page or 1
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
 
     if vehicle == 0 then
         lib.notify({
             title = 'Error',
-            description = 'You need to be in a vehicle to change liveries',
+            description = 'Get in or stand beside the vehicle to change liveries',
             type = 'error',
             duration = 5000
         })
@@ -460,7 +459,7 @@ function OpenLiveryMenu(page)
         table.insert(options, {
             title = 'No Liveries Available',
             description = 'This vehicle has no standard liveries',
-            icon = 'ban',
+            icon = 'circle-info',
             disabled = true
         })
     end
@@ -501,12 +500,12 @@ end
 
 -- Custom Liveries Menu
 function OpenCustomLiveriesMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
     
     if vehicle == 0 then
         lib.notify({
             title = 'Error',
-            description = 'You need to be in a vehicle to change liveries',
+            description = 'Get in or stand beside the vehicle to change liveries',
             type = 'error',
             duration = 5000
         })
@@ -570,7 +569,8 @@ function OpenCustomLiveriesMenu()
         table.insert(options, {
             title = 'No Custom Liveries',
             description = 'This vehicle has no custom YFT liveries configured',
-            onSelect = function() end
+            icon = 'circle-info',
+            disabled = true
         })
     end
     
@@ -727,7 +727,7 @@ end
 
 -- Function to search for liveries
 function OpenLiverySearchMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
     
     if vehicle == 0 then
         return
@@ -748,7 +748,8 @@ end
 
 -- Function to filter liveries by search term
 function FilteredLiveryMenu(searchTerm)
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     local options = {}
     local numLiveries = GetVehicleLiveryCount(vehicle)
     local currentLivery = GetVehicleLivery(vehicle)
@@ -888,7 +889,8 @@ end
 
 -- Performance Menu
 function OpenPerformanceMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
 
     -- IMPORTANT: Must set mod kit before accessing vehicle mods
     SetVehicleModKit(vehicle, 0)
@@ -971,7 +973,8 @@ end
 
 -- Performance mod selection menu
 function OpenPerformanceModMenu(modType, modTypeName)
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
 
     -- IMPORTANT: Must set mod kit before accessing vehicle mods
     SetVehicleModKit(vehicle, 0)
@@ -1048,7 +1051,8 @@ end
 
 -- Extras Menu
 function OpenExtrasMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     local options = {}
     
     for i = 1, 20 do
@@ -1058,6 +1062,7 @@ function OpenExtrasMenu()
             table.insert(options, {
                 title = 'Extra ' .. i,
                 description = isEnabled and 'Disable Extra ' .. i or 'Enable Extra ' .. i,
+                icon = isEnabled and 'toggle-on' or 'toggle-off',
                 metadata = {
                     {label = 'Status', value = isEnabled and 'Enabled' or 'Disabled'}
                 },
@@ -1079,7 +1084,8 @@ function OpenExtrasMenu()
         table.insert(options, {
             title = 'No Extras Available',
             description = 'This vehicle has no extras to toggle',
-            onSelect = function() end
+            icon = 'circle-info',
+            disabled = true
         })
     end
     
@@ -1094,7 +1100,8 @@ end
 
 -- Door Control Menu
 function OpenDoorsMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     local doors = {
         { title = 'Driver Door', index = 0 },
         { title = 'Passenger Door', index = 1 },
@@ -1111,6 +1118,7 @@ function OpenDoorsMenu()
         table.insert(options, {
             title = door.title,
             description = isDoorOpen and 'Close ' .. door.title or 'Open ' .. door.title,
+            icon = isDoorOpen and 'door-open' or 'door-closed',
             metadata = {
                 {label = 'Status', value = isDoorOpen and 'Open' or 'Closed'}
             },
@@ -1172,7 +1180,7 @@ end
 -- Roll windows up/down for emergency vehicle operations
 -----------------------------------------------------------
 function OpenWindowControlsMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
 
     if vehicle == 0 then
         lib.notify({
@@ -1454,6 +1462,7 @@ function OpenAppearanceMenu()
         {
             title = 'Colors',
             description = 'Change vehicle colors.',
+            icon = 'droplet',
             onSelect = function()
                 OpenColorsMenu()
             end
@@ -1461,6 +1470,7 @@ function OpenAppearanceMenu()
         {
             title = 'Wheels',
             description = 'Change vehicle wheels.',
+            icon = 'circle-notch',
             onSelect = function()
                 OpenWheelsMenu()
             end
@@ -1468,6 +1478,7 @@ function OpenAppearanceMenu()
         {
             title = 'Windows',
             description = 'Apply window tint.',
+            icon = 'sun',
             onSelect = function()
                 OpenWindowTintMenu()
             end
@@ -1475,6 +1486,7 @@ function OpenAppearanceMenu()
         {
             title = 'Neon Lights',
             description = 'Customize neon lights.',
+            icon = 'lightbulb',
             onSelect = function()
                 OpenNeonMenu()
             end
@@ -1492,7 +1504,8 @@ end
 
 -- Window Tint Menu
 function OpenWindowTintMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     
     local tintOptions = {
         { name = "None", tint = 0 },
@@ -1542,12 +1555,14 @@ end
 
 -- Neon Menu
 function OpenNeonMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     
     local options = {
         {
             title = 'Toggle Neon',
             description = 'Turn neon lights on/off',
+            icon = 'power-off',
             onSelect = function()
                 local hasNeon = false
                 for i = 0, 3 do
@@ -1573,6 +1588,7 @@ function OpenNeonMenu()
         {
             title = 'Neon Layout',
             description = 'Choose which neon lights to enable',
+            icon = 'table-cells-large',
             onSelect = function()
                 OpenNeonLayoutMenu()
             end
@@ -1580,6 +1596,7 @@ function OpenNeonMenu()
         {
             title = 'Neon Color',
             description = 'Change the color of neon lights',
+            icon = 'palette',
             onSelect = function()
                 OpenNeonColorMenu()
             end
@@ -1600,7 +1617,8 @@ end
 
 -- Neon Layout Menu
 function OpenNeonLayoutMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     
     local neonOptions = {
         { name = "Front", index = 2 },
@@ -1656,7 +1674,8 @@ end
 
 -- Neon Color Menu
 function OpenNeonColorMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     
     local colorOptions = {
         { name = "White", r = 255, g = 255, b = 255 },
@@ -1665,7 +1684,7 @@ function OpenNeonColorMenu()
         { name = "Mint Green", r = 50, g = 255, b = 155 },
         { name = "Lime Green", r = 0, g = 255, b = 0 },
         { name = "Yellow", r = 255, g = 255, b = 0 },
-        { name = "Golden Shower", r = 204, g = 204, b = 0 },
+        { name = "Gold", r = 204, g = 204, b = 0 },
         { name = "Orange", r = 255, g = 128, b = 0 },
         { name = "Red", r = 255, g = 0, b = 0 },
         { name = "Pony Pink", r = 255, g = 0, b = 255 },
@@ -1712,7 +1731,8 @@ end
 
 -- Colors Menu
 function OpenColorsMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     local primaryColor, secondaryColor = GetVehicleColours(vehicle)
     
     local colorOptions = {
@@ -1735,16 +1755,19 @@ function OpenColorsMenu()
         {
             title = 'Primary Color',
             description = 'Change the primary color of the vehicle.',
+            icon = 'droplet',
             menu = 'primary_color',
         },
         {
             title = 'Secondary Color',
             description = 'Change the secondary color of the vehicle.',
+            icon = 'fill-drip',
             menu = 'secondary_color',
         },
         {
             title = 'Pearlescent Color',
             description = 'Apply pearlescent finish.',
+            icon = 'gem',
             onSelect = function()
                 OpenPearlescentMenu()
             end
@@ -1830,7 +1853,8 @@ end
 
 -- Pearlescent Color Menu
 function OpenPearlescentMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     local pearlescentColor, wheelColor = GetVehicleExtraColours(vehicle)
     
     local pearlescentOptions = {
@@ -1887,7 +1911,8 @@ end
 
 -- Wheels Menu
 function OpenWheelsMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
 
     -- IMPORTANT: Must set mod kit before accessing vehicle mods
     SetVehicleModKit(vehicle, 0)
@@ -1933,6 +1958,7 @@ function OpenWheelsMenu()
     table.insert(options, {
         title = 'Wheel Color',
         description = 'Change the color of wheels',
+        icon = 'fill-drip',
         onSelect = function()
             OpenWheelColorMenu()
         end
@@ -1952,7 +1978,8 @@ end
 
 -- Wheel Style Selection Menu
 function OpenWheelSelectionMenu(wheelType)
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
 
     -- IMPORTANT: Must set mod kit before accessing vehicle mods
     SetVehicleModKit(vehicle, 0)
@@ -2004,7 +2031,8 @@ end
 
 -- Wheel Color Menu
 function OpenWheelColorMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
+    if vehicle == 0 then return end
     local pearlescent, wheelColor = GetVehicleExtraColours(vehicle)
     
     local colorOptions = {
@@ -2056,12 +2084,12 @@ end
 
 -- Save Vehicle Configuration with enhanced error handling
 function SaveVehicleConfig()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
     
     if vehicle == 0 then
         lib.notify({
             title = 'Error',
-            description = 'You need to be in a vehicle to save configuration',
+            description = 'Get in or stand beside the vehicle to save its configuration',
             type = 'error',
             duration = 5000
         })
@@ -2228,6 +2256,8 @@ end
 -- Event handler to apply vehicle configuration from server
 RegisterNetEvent('vehiclemods:client:applyVehicleConfig')
 AddEventHandler('vehiclemods:client:applyVehicleConfig', function(vehicleModel, configJson)
+    -- Deliberately ped-based (NOT GetMenuVehicle): this config arrives for the
+    -- vehicle the player just entered, which may not be the last menu subject.
     local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
     
     if vehicle == 0 then
@@ -2502,12 +2532,12 @@ end
 -- Emergency Repair System (Enhanced)
 function EmergencyRepairVehicle()
     local playerPed = PlayerPedId()
-    local vehicle = GetVehiclePedIsIn(playerPed, false)
+    local vehicle = GetMenuVehicle()
 
     if vehicle == 0 then
         lib.notify({
-            title = 'Error',
-            description = 'You must be in a vehicle to use emergency repair',
+            title = 'Emergency Repair',
+            description = 'Get in or stand beside the vehicle to repair it',
             type = 'error',
             duration = 5000
         })
@@ -2541,11 +2571,15 @@ function EmergencyRepairVehicle()
     })
 
     if alert == 'confirm' then
-        -- Exit vehicle for repair animation
-        local wasDriver = GetPedInVehicleSeat(vehicle, -1) == playerPed
+        -- Exit vehicle for the repair animation — only if actually inside
+        -- (on-foot ox_target flow starts beside the vehicle)
+        local wasInside = GetVehiclePedIsIn(playerPed, false) == vehicle
+        local wasDriver = wasInside and GetPedInVehicleSeat(vehicle, -1) == playerPed
 
-        TaskLeaveVehicle(playerPed, vehicle, 0)
-        Wait(2000)
+        if wasInside then
+            TaskLeaveVehicle(playerPed, vehicle, 0)
+            Wait(2000)
+        end
 
         -- Play repair animation with proper scenario
         lib.notify({
@@ -2582,6 +2616,22 @@ function EmergencyRepairVehicle()
         end
 
         if repairSuccess then
+            -- Charge only AFTER the work finished (review catch: charging
+            -- before a cancelable progress bar meant cancel = money gone).
+            -- Cost derived server-side; mechanics free, 25% emergency discount.
+            local paid, payMsg = lib.callback.await('vehiclemods:server:chargeRepair', false, 'emergency')
+            if not paid then
+                lib.notify({
+                    title = 'Emergency Repair',
+                    description = payMsg or 'Payment failed — no repairs applied',
+                    type = 'error',
+                    duration = 5000
+                })
+                if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
+                TriggerEvent('vehiclemods:client:openVehicleModMenu')
+                return
+            end
+
             -- Apply emergency repairs
             SetVehicleEngineHealth(vehicle, 450.0)
             SetVehicleBodyHealth(vehicle, 650.0)
@@ -2605,7 +2655,7 @@ function EmergencyRepairVehicle()
 
             -- Get back in vehicle
             Wait(500)
-            TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0)
+            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
 
             -- Play success sound
             PlaySoundFrontend(-1, "PICK_UP_WEAPON", "HUD_FRONTEND_CUSTOM_SOUNDSET", true)
@@ -2637,7 +2687,7 @@ function EmergencyRepairVehicle()
                 type = 'error',
                 duration = 3000
             })
-            TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0)
+            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
         end
 
         TriggerEvent('vehiclemods:client:openVehicleModMenu')
@@ -2649,12 +2699,12 @@ end
 -- Full Repair Function (Enhanced)
 function FullRepairVehicle()
     local playerPed = PlayerPedId()
-    local vehicle = GetVehiclePedIsIn(playerPed, false)
+    local vehicle = GetMenuVehicle()
 
     if vehicle == 0 then
         lib.notify({
-            title = 'Error',
-            description = 'You must be in a vehicle to repair it',
+            title = 'Full Repair',
+            description = 'Get in or stand beside the vehicle to repair it',
             type = 'error',
             duration = 5000
         })
@@ -2682,10 +2732,13 @@ function FullRepairVehicle()
     })
 
     if alert == 'confirm' then
-        -- Exit vehicle for full repair
-        local wasDriver = GetPedInVehicleSeat(vehicle, -1) == playerPed
-        TaskLeaveVehicle(playerPed, vehicle, 0)
-        Wait(2000)
+        -- Exit vehicle for the repair — only if actually inside
+        local wasInside = GetVehiclePedIsIn(playerPed, false) == vehicle
+        local wasDriver = wasInside and GetPedInVehicleSeat(vehicle, -1) == playerPed
+        if wasInside then
+            TaskLeaveVehicle(playerPed, vehicle, 0)
+            Wait(2000)
+        end
 
         -- Multi-stage full repair
         local stages = {
@@ -2714,20 +2767,27 @@ function FullRepairVehicle()
                 break
             end
 
-            -- Incremental repair during process
-            if i == 2 then
-                SetVehicleEngineHealth(vehicle, 1000.0)
-            elseif i == 3 then
-                SetVehicleBodyHealth(vehicle, 1000.0)
-            elseif i == 4 then
-                -- Fix all tires
-                for t = 0, 5 do SetVehicleTyreFixed(vehicle, t) end
-                -- Fix all windows
-                for w = 0, 7 do FixVehicleWindow(vehicle, w) end
-            end
+            -- (Incremental mid-stage repairs removed 2026-08-28: they applied
+            -- real fixes before payment, so canceling — or failing the charge —
+            -- after stage 2 still yielded a mostly-repaired vehicle for free.
+            -- All effects now apply only after payment clears below.)
         end
 
         if repairSuccess then
+            -- Charge only AFTER the work finished (no pay-for-cancel)
+            local paid, payMsg = lib.callback.await('vehiclemods:server:chargeRepair', false, 'full')
+            if not paid then
+                lib.notify({
+                    title = 'Full Repair',
+                    description = payMsg or 'Payment failed — no repairs applied',
+                    type = 'error',
+                    duration = 5000
+                })
+                if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
+                TriggerEvent('vehiclemods:client:openVehicleModMenu')
+                return
+            end
+
             -- Complete full repair
             SetVehicleFixed(vehicle)
             SetVehicleDeformationFixed(vehicle)
@@ -2744,7 +2804,7 @@ function FullRepairVehicle()
 
             -- Get back in vehicle
             Wait(500)
-            TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0)
+            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
 
             -- Success sound
             PlaySoundFrontend(-1, "SHOOTING_RANGE_ROUND_OVER", "HUD_AWARDS", true)
@@ -2756,14 +2816,13 @@ function FullRepairVehicle()
                 duration = 5000
             })
         else
-            -- Partial repair if cancelled mid-way
             lib.notify({
                 title = 'Repair Interrupted',
-                description = 'Partial repairs applied. Some damage may remain.',
+                description = 'Repair cancelled — no changes applied and nothing charged.',
                 type = 'warning',
                 duration = 4000
             })
-            TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0)
+            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
         end
 
         TriggerEvent('vehiclemods:client:openVehicleModMenu')
@@ -2781,12 +2840,12 @@ local pendingFieldRepair = nil
 -- Request field repair from server
 function RequestFieldRepair()
     local playerPed = PlayerPedId()
-    local vehicle = GetVehiclePedIsIn(playerPed, false)
+    local vehicle = GetMenuVehicle()
 
     if vehicle == 0 then
         lib.notify({
-            title = 'Error',
-            description = 'You must be in a vehicle',
+            title = 'Field Repair',
+            description = 'Get in or stand beside the vehicle to repair it',
             type = 'error',
             duration = 3000
         })
@@ -2837,13 +2896,15 @@ AddEventHandler('vehiclemods:client:fieldRepairResult', function(approved, error
         return
     end
 
-    -- Perform field repair
+    -- Perform field repair (from inside or standing beside the vehicle)
     local playerPed = PlayerPedId()
-    local wasDriver = GetPedInVehicleSeat(vehicle, -1) == playerPed
+    local wasInside = GetVehiclePedIsIn(playerPed, false) == vehicle
+    local wasDriver = wasInside and GetPedInVehicleSeat(vehicle, -1) == playerPed
 
-    -- Exit vehicle
-    TaskLeaveVehicle(playerPed, vehicle, 0)
-    Wait(2000)
+    if wasInside then
+        TaskLeaveVehicle(playerPed, vehicle, 0)
+        Wait(2000)
+    end
 
     lib.notify({
         title = 'Field Repair',
@@ -2866,6 +2927,20 @@ AddEventHandler('vehiclemods:client:fieldRepairResult', function(approved, error
     })
 
     if success then
+        -- Completion phase: server charges, consumes the kit and starts the
+        -- cooldown only now — a canceled progress bar cost nothing.
+        local ok, failMsg = lib.callback.await('vehiclemods:server:completeFieldRepair', false)
+        if not ok then
+            lib.notify({
+                title = 'Field Repair',
+                description = failMsg or 'Field repair could not be completed',
+                type = 'error',
+                duration = 5000
+            })
+            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
+            return
+        end
+
         -- Apply limited repair
         SetVehicleEngineHealth(vehicle, maxRepair or 350.0)
         SetVehicleUndriveable(vehicle, false)
@@ -2883,7 +2958,7 @@ AddEventHandler('vehiclemods:client:fieldRepairResult', function(approved, error
         SetVehicleEngineTorqueMultiplier(vehicle, 0.5)
 
         Wait(500)
-        TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0)
+        if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
 
         PlaySoundFrontend(-1, "PICK_UP_WEAPON", "HUD_FRONTEND_CUSTOM_SOUNDSET", true)
 
@@ -2900,7 +2975,7 @@ AddEventHandler('vehiclemods:client:fieldRepairResult', function(approved, error
             type = 'error',
             duration = 3000
         })
-        TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0)
+        if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
     end
 end)
 
@@ -2987,7 +3062,7 @@ end
 
 -- Open preset menu
 function OpenPresetMenu()
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
     if vehicle == 0 then
         lib.notify({
             title = 'Error',
@@ -3017,7 +3092,7 @@ RegisterNetEvent('vehiclemods:client:receivePresets')
 AddEventHandler('vehiclemods:client:receivePresets', function(presets)
     cachedPresets = presets or {}
 
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local vehicle = GetMenuVehicle()
     if vehicle == 0 then return end
 
     local vehicleModel = GetDisplayNameFromVehicleModel(GetEntityModel(vehicle))
@@ -3434,128 +3509,8 @@ function GetEnhancedLiveryName(vehicle, liveryIndex)
     end
 end
 
------------------------------------------------------------
--- REPAIR COST SYSTEM (v2.1.1+)
--- Integration with server economy
------------------------------------------------------------
-local currentZoneType = nil -- Track current zone for context
-
-function GetRepairCost(repairType, vehicle)
-    local cfg = Config.RepairCosts
-    if not cfg or not cfg.enabled then
-        return 0, true -- Free if disabled
-    end
-
-    -- Get base cost
-    local baseCost = 0
-    if repairType == 'full' then
-        baseCost = cfg.fullRepairCost
-    elseif repairType == 'emergency' then
-        baseCost = cfg.emergencyRepairCost
-    elseif repairType == 'field' then
-        baseCost = cfg.fieldRepairCost
-    end
-
-    -- Scale by damage if enabled
-    if cfg.scaleCostByDamage and vehicle and vehicle ~= 0 then
-        local damage = GetVehicleDamageReport(vehicle)
-        if damage then
-            -- Lower condition = higher cost
-            local damagePercent = (100 - damage.overallCondition) / 100
-            local multiplier = 1 + (damagePercent * (cfg.maxCostMultiplier - 1))
-            baseCost = math.floor(baseCost * multiplier)
-        end
-    end
-
-    return baseCost, false
-end
-
--- Request payment from server
-function RequestRepairPayment(repairType, cost, callback)
-    if cost <= 0 then
-        callback(true)
-        return
-    end
-
-    TriggerServerEvent('vehiclemods:server:chargeRepair', repairType, cost)
-
-    -- Wait for response
-    local responded = false
-    local success = false
-
-    RegisterNetEvent('vehiclemods:client:repairPaymentResult')
-    AddEventHandler('vehiclemods:client:repairPaymentResult', function(result, message)
-        responded = true
-        success = result
-        if not result then
-            lib.notify({
-                title = 'Payment Failed',
-                description = message or 'Insufficient funds',
-                type = 'error',
-                duration = 4000
-            })
-        end
-    end)
-
-    -- Timeout after 5 seconds
-    SetTimeout(5000, function()
-        if not responded then
-            callback(false)
-        else
-            callback(success)
-        end
-    end)
-end
-
------------------------------------------------------------
--- JOB-SPECIFIC SUB-MENUS (v2.1.1+)
--- Zone-aware menu customization
------------------------------------------------------------
-function GetCurrentZoneDefaults()
-    if not Config.JobDefaults or not Config.JobDefaults.enabled then
-        return nil
-    end
-
-    local playerCoords = GetEntityCoords(PlayerPedId())
-
-    for _, zone in ipairs(Config.ModificationZones) do
-        local distance = #(playerCoords - zone.coords)
-        if distance <= zone.radius then
-            currentZoneType = zone.type
-            return Config.JobDefaults[zone.type]
-        end
-    end
-
-    currentZoneType = nil
-    return nil
-end
-
--- Get priority extras for current zone
-function GetPriorityExtras()
-    local defaults = GetCurrentZoneDefaults()
-    if defaults and defaults.priorityExtras then
-        return defaults.priorityExtras
-    end
-    return {}
-end
-
--- Check if neon should be shown for current zone
-function ShouldShowNeon()
-    local defaults = GetCurrentZoneDefaults()
-    if defaults then
-        return defaults.showNeon ~= false
-    end
-    return true
-end
-
--- Get suggested colors for current zone
-function GetZoneSuggestedColors()
-    local defaults = GetCurrentZoneDefaults()
-    if defaults and defaults.defaultColors then
-        return defaults.defaultColors
-    end
-    return nil
-end
+-- (Dead repair-payment and zone-defaults helpers removed 2026-08-28 — see
+-- CHANGELOG 2.4.0. Repairs charge via the 'vehiclemods:server:chargeRepair' callback.)
 
 
 -- ---------------------------------------------------------------------------

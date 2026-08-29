@@ -19,7 +19,7 @@ The Emergency Vehicle Menu now features a sophisticated job-based access control
 
 ### **🔄 Auto-Configuration**
 - Detects ESX, QBCore, QBox database schemas automatically
-- Maps common job variations (police/lspd/bcso, fire/lsfd, ambulance/ems)
+- Maps job groups to the server's real jobs (DPS: police/bcso/sasp/fib/doc/dfw, lsfd, ambulance)
 - Configures appropriate database queries per framework
 
 ## 🏢 Default Zone Configuration
@@ -61,10 +61,12 @@ Config.JobCacheTimeout = 300000         -- 5 minutes cache lifetime
 Config.ManualJobSystem = true           -- Disable auto job detection
 
 -- Custom job mappings
+-- DPS live values (must match qbx_core/shared/jobs.lua)
 Config.JobMappings = {
-    police = {"police", "lspd", "bcso", "sahp", "sheriff"},
-    fire = {"fire", "lsfd", "firefighter"},
-    ambulance = {"ambulance", "ems", "medical", "safd"}
+    police = {"police", "bcso", "sasp", "fib", "doc", "dfw"},
+    fire = {"lsfd"},
+    ambulance = {"ambulance"},
+    mechanic = {"mechanic"}
 }
 ```
 
