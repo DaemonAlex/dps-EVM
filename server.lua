@@ -290,7 +290,8 @@ local emergencyJobSetCache = nil
 local function GetEmergencyJobSet()
     if emergencyJobSetCache then return emergencyJobSetCache end
     local set = {}
-    for _, group in ipairs({'police', 'fire', 'ambulance'}) do
+    -- DPS 2026-09-27 Damon: "EVM any vehicle" for admins and mechanics — the mechanic group joins the access set.
+    for _, group in ipairs({'police', 'fire', 'ambulance', 'mechanic'}) do
         local names = Config.JobMappings and Config.JobMappings[group]
         if names then
             for _, n in ipairs(names) do set[n] = true end
