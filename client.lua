@@ -13,6 +13,9 @@ local isOpen = false
 local startMode = 'browse'
 local ALL = {}            -- rows: model, name, brand, category, type, price, pack, cls, make, dept, kind, photo, speed, seats
 local BY_MODEL = {}
+local BY_HASH = {}        -- model hash -> model name, so a live vehicle names itself
+local wsVehicle = nil     -- the vehicle the workshop is working on, re-resolved on every call
+local wsModel = nil       -- its model name, kept so the last-spawned fallback still works
 local INFO = {}           -- model -> model-native info, read once per session
 local HANDLING = {}       -- model -> last handling record read from a live vehicle
 local lastSpawned = nil   -- { netId, model }
@@ -126,7 +129,7 @@ end
 -- ── rows ───────────────────────────────────────────────────────────────────────
 
 local function buildRows(data)
-    ALL, BY_MODEL = {}, {}
+    ALL, BY_MODEL, BY_HASH = {}, {}, {}
     local packs, classes, emergency, photos = data.packs or {}, data.classes or {}, data.emergency or {}, data.photos or {}
     local registry = exports.qbx_core:GetVehiclesByName()
     if type(registry) ~= 'table' then return end
@@ -143,6 +146,7 @@ local function buildRows(data)
         end
         ALL[#ALL + 1] = row
         BY_MODEL[model] = row
+        BY_HASH[joaat(model)] = model
     end
 end
 
@@ -279,15 +283,120 @@ RegisterNUICallback('delete', function(_, cb)
     cb({ ok = ok == true, reason = ok and nil or 'Could not remove it.' })
 end)
 
--- Workshop: hand the selected vehicle (the one we sit in, else the last spawned) to dps-EVM.
-RegisterNUICallback('workshop', function(req, cb)
-    local model = type(req) == 'table' and req.model or nil
-    local veh = model and liveVehicle(model) or nil
-    if not veh then cb({ ok = false, reason = 'Spawn it or sit in it first.' }) return end
-    if GetResourceState('dps-EVM') ~= 'started' then cb({ ok = false, reason = 'Workshop (dps-EVM) is not running.' }) return end
-    closePanel()
-    TriggerEvent('vehiclemods:client:openVehicleModMenu', veh)
-    cb({ ok = true })
+-- ── workshop mode ──────────────────────────────────────────────────────────────
+-- The panel renders the sheets client/workshop.lua builds; this part only resolves
+-- the vehicle, checks access once on open, and hands sheets back.
+
+---Undercover for the neon rule means "listed in Config.UndercoverNeon", the only
+---definition this resource has.
+local function isUndercoverModel(model)
+    local uc = Config.UndercoverNeon
+    if not uc or not uc.enabled or type(model) ~= 'string' then return false end
+    for _, allowed in ipairs(uc.allowedVehicles or {}) do
+        if allowed == model then return true end
+    end
+    return false
+end
+
+---Explicit entity (ox_target, Task 8) > the vehicle we sit in > the last one we
+---spawned of this model. Re-run before every workshop call so a deleted vehicle
+---is caught instead of handed to a native.
+local function resolveWorkshopVehicle(model)
+    local explicit = WorkshopClient and WorkshopClient.vehicle and WorkshopClient.vehicle() or nil
+    if explicit then return explicit end
+    local veh = cache.vehicle
+    if veh and veh ~= 0 and DoesEntityExist(veh) then return veh end
+    if type(model) == 'string' then return liveVehicle(model) end
+    return nil
+end
+
+local function wsResolve(model)
+    wsVehicle = resolveWorkshopVehicle(model)
+    return wsVehicle
+end
+
+local function wsSections()
+    return Workshop.enabledSections(Config, wsModel, isUndercoverModel(wsModel))
+end
+
+local function sectionAllowed(id)
+    for _, section in ipairs(wsSections()) do
+        if section.id == id then return true end
+    end
+    return false
+end
+
+local NOT_WIRED = { sirens = 'Siren tones are not wired up yet.' }
+
+---The colour swatches, keyed by string so the index-0 entry survives the trip to
+---the NUI (a 0-based Lua table is not an array and must not become one).
+local COLOUR_HEX_NUI
+local function colourHexMap()
+    if COLOUR_HEX_NUI then return COLOUR_HEX_NUI end
+    COLOUR_HEX_NUI = {}
+    for index, hex in pairs(Workshop.COLOUR_HEX or {}) do COLOUR_HEX_NUI[tostring(index)] = hex end
+    return COLOUR_HEX_NUI
+end
+
+RegisterNUICallback('ws:open', function(req, cb)
+    local model = nil
+    if type(req) == 'table' and type(req.model) == 'string' and #req.model <= 40 then model = req.model end
+    local veh = wsResolve(model)
+    if not veh then cb({ ok = false, reason = 'Sit in a vehicle or target one.' }) return end
+    wsModel = BY_HASH[GetEntityModel(veh)]
+
+    local ok, why = lib.callback.await('dps-fleet:server:workshopAccess', false)
+    if not ok then
+        local reason = type(why) == 'string' and why or 'You cannot use the workshop.'
+        notify(reason, 'error')
+        cb({ ok = false, reason = reason })
+        return
+    end
+
+    local row = wsModel and BY_MODEL[wsModel] or nil
+    local plate = GetVehicleNumberPlateText(veh)
+    cb({
+        ok = true,
+        vehicle = {
+            model = wsModel or '-',
+            name = row and ((row.brand ~= '' and row.brand .. ' ' or '') .. row.name) or 'This vehicle',
+            plate = type(plate) == 'string' and plate:gsub('%s+$', '') or nil,
+        },
+        sections = wsSections(),
+        colourHex = colourHexMap(),
+    })
+end)
+
+RegisterNUICallback('ws:sheet', function(req, cb)
+    local section = type(req) == 'table' and req.section or nil
+    if type(section) ~= 'string' or #section > 40 then cb({ ok = false, reason = 'Unknown section.' }) return end
+    if not sectionAllowed(section) then cb({ ok = false, reason = 'That section is switched off.' }) return end
+    local veh = wsResolve(wsModel)
+    if not veh then cb({ ok = false, gone = true, reason = 'That vehicle is gone.' }) return end
+    local sheet = WorkshopClient.sheet(veh, section)
+    if not sheet then cb({ ok = false, reason = NOT_WIRED[section] or 'Nothing to change here.' }) return end
+    cb({ ok = true, sheet = sheet })
+end)
+
+RegisterNUICallback('ws:apply', function(req, cb)
+    if type(req) ~= 'table' then cb({ ok = false, reason = 'Nothing to apply.' }) return end
+    local section, key, value = req.section, req.key, req.value
+    if type(section) ~= 'string' or #section > 40 then cb({ ok = false, reason = 'Unknown section.' }) return end
+    if type(key) ~= 'string' or #key > 80 then cb({ ok = false, reason = 'Nothing to apply.' }) return end
+    local kind = type(value)
+    if kind ~= 'nil' and kind ~= 'boolean' and kind ~= 'number' and kind ~= 'string' and kind ~= 'table' then
+        cb({ ok = false, reason = 'That value makes no sense.' })
+        return
+    end
+    if not sectionAllowed(section) then cb({ ok = false, reason = 'That section is switched off.' }) return end
+    local veh = wsResolve(wsModel)
+    if not veh then cb({ ok = false, gone = true, reason = 'That vehicle is gone.' }) return end
+
+    local ok, message = WorkshopClient.apply(veh, section, key, value)
+    -- an apply may open an ox_lib dialog, which drops NUI focus on the way out
+    if isOpen then SetNuiFocus(true, true) end
+    local sheet = DoesEntityExist(veh) and WorkshopClient.sheet(veh, section) or nil
+    cb({ ok = ok, message = message, sheet = sheet })
 end)
 
 AddEventHandler('onResourceStop', function(res)

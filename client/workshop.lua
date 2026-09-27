@@ -1013,3 +1013,30 @@ end
 WorkshopClient.liveryLabel = GetLiveryLabel
 WorkshopClient.enhancedLiveryName = GetEnhancedLiveryName
 WorkshopClient.saveLiveryToMemory = SaveLiveryToMemory
+
+-- ── the vehicle the panel works on ────────────────────────────────────────────
+-- ox_target (Task 8) sets the vehicle it was used on; the panel prefers it over
+-- the one we sit in. A stale entity clears itself so nothing ever hands a dead
+-- handle to a native.
+
+local explicitVehicle = nil
+
+---@param entity number
+function WorkshopClient.setVehicle(entity)
+    if not entity or entity == 0 or not DoesEntityExist(entity) then return end
+    explicitVehicle = entity
+end
+
+function WorkshopClient.clearVehicle()
+    explicitVehicle = nil
+end
+
+---@return number|nil
+function WorkshopClient.vehicle()
+    if not explicitVehicle then return nil end
+    if not DoesEntityExist(explicitVehicle) then
+        explicitVehicle = nil
+        return nil
+    end
+    return explicitVehicle
+end

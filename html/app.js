@@ -1,17 +1,24 @@
 /* DPS Fleet panel: a floating search bar with the grouped list under it.
    The client (Lua) owns data, grouping and card text; this file renders and routes keys.
+   Two modes share the bar: Browse (the fleet list) and Workshop (option sheets for the
+   vehicle you are in or targeting). Workshop sheets are built in Lua and rendered here
+   from their descriptors, so a new section needs no change in this file.
    Nothing here polls: every change is a user action or a message from the client. */
 (function () {
-  const RES = (typeof GetParentResourceName === 'function') ? GetParentResourceName() : 'dps-carmenu';
+  const RES = (typeof GetParentResourceName === 'function') ? GetParentResourceName() : 'dps-fleet';
   const $ = (s) => document.querySelector(s);
   const app = $('#app'), bar = $('#bar'), panel = $('#panel'), list = $('#list'), q = $('#q'), hint = $('#hint');
+  const ws = $('#ws'), wslist = $('#wslist'), chips = $('#chips');
   const ICON = { automobile: 'fa-car-side', bike: 'fa-motorcycle', heli: 'fa-helicopter', plane: 'fa-plane', boat: 'fa-ship', trailer: 'fa-trailer', train: 'fa-train' };
   const TYPE = { automobile: 'Car / truck', bike: 'Bike', heli: 'Helicopter', plane: 'Plane', boat: 'Boat', trailer: 'Trailer', train: 'Train' };
+  const PLACE = { browse: 'Search a vehicle, a department, a kind… (F7 closes)', workshop: 'Filter options… (F7 closes)' };
   const HINT = {
     type: '<kbd>↓</kbd> browse &nbsp;<kbd>Enter</kbd> spawn &nbsp;<kbd>⇧Enter</kbd> beside &nbsp;<kbd>Esc</kbd> close',
     browse: '<kbd>↑↓</kbd> move &nbsp;<kbd>Enter</kbd> spawn &nbsp;<kbd>C</kbd> card &nbsp;<kbd>H</kbd> handling &nbsp;<kbd>F</kbd> fav &nbsp;<kbd>W</kbd> workshop &nbsp;<kbd>X</kbd> remove · type to search',
+    ws: '<kbd>↑↓</kbd> move &nbsp;<kbd>Enter</kbd> switch / choose &nbsp;<kbd>←→</kbd> levels &nbsp;<kbd>Esc</kbd> back · type to filter options',
   };
-  const S = { byModel: {}, total: 0, recent: [], favs: new Set(), deptNames: {}, deptCodes: {}, catLabels: {}, chip: 'all', rows: [], sel: -1, open: false, mode: 'type', timer: null, infoTimer: null };
+  const S = { byModel: {}, total: 0, recent: [], favs: new Set(), deptNames: {}, deptCodes: {}, catLabels: {}, chip: 'all', rows: [], sel: -1, open: false, pmode: 'browse', focus: 'type', timer: null, infoTimer: null };
+  const W = { sections: [], sec: null, icon: {}, sheet: null, rows: [], sel: -1, openKey: null, ci: -1, vehicle: null, hex: {}, note: '' };
 
   const store = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
@@ -34,7 +41,7 @@
     return Promise.resolve(ok);
   }
 
-  /* ---------- rendering ---------- */
+  /* ---------- rendering: browse ---------- */
   const sub = (v) => v.category === 'emergency' ? (v.kind || 'Emergency') : (S.catLabels[v.category] || v.category);
   const photo = (v, big) => v.photo ? `<img src="${esc(v.photo)}" alt=""${big ? '' : ' loading="lazy"'}>` : `<i class="fa-solid ${ICON[v.type] || 'fa-car-side'}"></i>`;
   function rowHtml(v, i) {
@@ -118,9 +125,163 @@
     if (r.offsetHeight > list.clientHeight - H || top - H < list.scrollTop) list.scrollTop = top - H;
     else if (bot > list.scrollTop + list.clientHeight) list.scrollTop = bot - list.clientHeight;
   }
-  function setMode(m) { S.mode = m; hint.innerHTML = HINT[m]; bar.classList.toggle('focus', m === 'type'); }
+  function setFocus(m) { S.focus = m; bar.classList.toggle('focus', m === 'type'); hint.innerHTML = S.pmode === 'workshop' ? HINT.ws : HINT[m]; }
 
-  /* ---------- actions ---------- */
+  /* ---------- rendering: workshop ---------- */
+  // Values can be numbers, strings, booleans or small objects ({ src, index }, [r,g,b]).
+  // Lua hands objects over in no fixed key order, so compare on a sorted-key form.
+  function canon(v) {
+    if (v === null || v === undefined) return 'null';
+    if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
+    if (typeof v === 'object') return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
+    return JSON.stringify(v);
+  }
+  const same = (a, b) => canon(a) === canon(b);
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+  const wsRowEl = (i) => wslist.querySelector(`.row[data-i="${i}"]`);
+  function curChoice(o) {
+    for (const c of (o.choices || [])) { if (same(c.value, o.value)) return c; }
+    return null;
+  }
+  function hexOf(c) {
+    if (!c) return '#333a52';
+    if (c.hex) return String(c.hex);
+    const v = c.value;
+    if (typeof v === 'number') return W.hex[v] || W.hex[String(v)] || '#333a52';
+    if (Array.isArray(v) && v.length === 3) return `rgb(${Number(v[0]) || 0},${Number(v[1]) || 0},${Number(v[2]) || 0})`;
+    return '#333a52';
+  }
+  function stepText(o) {
+    const v = Number(o.value), max = o.max == null ? null : Number(o.max);
+    if (isNaN(v)) return '-';
+    if (v <= -1) return 'stock';
+    return max == null ? String(v + 1) : `${v + 1}/${max + 1}`;
+  }
+  function valLine(o) {
+    if (o.kind === 'toggle') return o.value ? 'On' : 'Off';
+    if (o.kind === 'stepper') { const v = Number(o.value); return v <= -1 ? 'Stock' : `Level ${v + 1}${o.max == null ? '' : ' of ' + (Number(o.max) + 1)}`; }
+    if (o.kind === 'pick' || o.kind === 'colour') { const c = curChoice(o); return c ? String(c.label) : 'Not set'; }
+    if (o.kind === 'action') return o.value === false ? 'Looks unavailable — click to see why' : '';
+    return '';
+  }
+  function controlHtml(o) {
+    if (o.kind === 'toggle') return `<button class="sw${o.value ? ' on' : ''}" data-a="toggle" title="Switch" aria-pressed="${o.value ? 'true' : 'false'}"><span></span></button>`;
+    if (o.kind === 'stepper') return `<div class="step"><button data-a="dec" title="Lower">‹</button><b>${esc(stepText(o))}</b><button data-a="inc" title="Higher">›</button></div>`;
+    if (o.kind === 'pick' || o.kind === 'colour') {
+      const c = curChoice(o);
+      const sw = o.kind === 'colour' ? `<span class="swatch" style="background:${esc(hexOf(c))}"></span>` : '';
+      return `<button class="pk" data-a="choices" title="Choose">${sw}<span class="lb">${esc(c ? c.label : 'Choose…')}</span><i class="fa-solid fa-chevron-${W.openKey === o.key ? 'up' : 'down'}"></i></button>`;
+    }
+    return `<button class="go" data-a="do" title="Do it">Run</button>`;
+  }
+  function choicesHtml(o) {
+    let h = '<div class="det choices">';
+    (o.choices || []).forEach((c, j) => {
+      const on = same(c.value, o.value), sw = o.kind === 'colour' ? `<span class="swatch" style="background:${esc(hexOf(c))}"></span>` : '';
+      h += `<button class="ch${on ? ' on' : ''}${W.ci === j ? ' cur' : ''}" data-c="${j}">${sw}<span class="lb">${esc(c.label)}</span></button>`;
+    });
+    return h + '</div>';
+  }
+  function wsRowHtml(o, i) {
+    const icon = W.icon[W.sec] || 'fa-sliders';
+    const dim = o.kind === 'action' && o.value === false;
+    const line = valLine(o);
+    return `<div class="row${dim ? ' off' : ''}" data-i="${i}" role="option"><div class="thumb"><i class="fa-solid ${esc(icon)}"></i></div>`
+      + `<div class="txt"><div class="nm">${esc(o.label)}</div>${line ? `<div class="mt">${esc(line)}</div>` : ''}</div>`
+      + `<div class="rt">${controlHtml(o)}</div>${W.openKey === o.key ? choicesHtml(o) : ''}</div>`;
+  }
+  function renderHead() {
+    const v = W.vehicle || {};
+    $('#wshead').innerHTML = `<b>${esc(v.name || 'This vehicle')}</b><code>${esc(v.model || '')}</code>${v.plate ? `<span class="plate">${esc(v.plate)}</span>` : ''}`;
+  }
+  function renderNav() {
+    $('#wsnav').innerHTML = W.sections.map((s) => `<button class="chip${s.id === W.sec ? ' on' : ''}" data-s="${esc(s.id)}"><i class="fa-solid ${esc(s.icon || 'fa-sliders')}"></i>${esc(s.label)}</button>`).join('');
+  }
+  function renderSheet(keepKey) {
+    const keep = keepKey || (W.rows[W.sel] ? W.rows[W.sel].key : null);
+    if (!W.sheet) {
+      W.rows = []; W.sel = -1;
+      wslist.innerHTML = `<div class="empty">${esc(W.note || 'Nothing to change here.')}</div>`;
+      $('#cnt').textContent = '';
+      return;
+    }
+    const f = q.value.trim().toLowerCase(), all = W.sheet.options || [];
+    W.rows = f ? all.filter((o) => String(o.label == null ? '' : o.label).toLowerCase().indexOf(f) >= 0) : all.slice();
+    if (!W.rows.length) {
+      W.sel = -1;
+      wslist.innerHTML = `<div class="empty">${f ? `No option matches “${esc(q.value)}”.` : 'This section has nothing for this vehicle.'}</div>`;
+    } else {
+      wslist.innerHTML = W.rows.map(wsRowHtml).join('');
+    }
+    $('#cnt').textContent = `${W.rows.length} option${W.rows.length === 1 ? '' : 's'}`;
+    let i = keep ? W.rows.findIndex((o) => o.key === keep) : -1;
+    if (i < 0) i = W.rows.length ? 0 : -1;
+    W.sel = -1; wsSelect(i);
+  }
+  function wsSelect(i) {
+    if (!W.rows.length) { W.sel = -1; return; }
+    i = clamp(i, 0, W.rows.length - 1);
+    const old = wslist.querySelector('.row.sel'); if (old) old.classList.remove('sel');
+    W.sel = i;
+    const r = wsRowEl(i); if (!r) return;
+    r.classList.add('sel');
+    const top = r.offsetTop, bot = top + r.offsetHeight;
+    if (r.offsetHeight > wslist.clientHeight || top < wslist.scrollTop) wslist.scrollTop = top;
+    else if (bot > wslist.scrollTop + wslist.clientHeight) wslist.scrollTop = bot - wslist.clientHeight;
+  }
+
+  /* ---------- workshop traffic ---------- */
+  function wsApply(o, value) {
+    if (!o) return;
+    // Actions carry no value at all: the key is left out so Lua reads a plain nil.
+    const body = { section: W.sec, key: o.key };
+    if (value !== undefined && value !== null) body.value = value;
+    post('ws:apply', body).then((r) => {
+      if (r.message) toast(esc(r.message), !r.ok);
+      else if (!r.ok) toast(esc(r.reason || 'That did not work.'), true);
+      if (r.gone) { setPanelMode('browse'); return; }
+      W.openKey = null; W.ci = -1;
+      if (r.sheet) { W.sheet = r.sheet; renderSheet(o.key); }
+    });
+  }
+  function loadSection(id) {
+    W.sec = id; W.openKey = null; W.ci = -1; W.sheet = null; W.note = '';
+    renderNav();
+    post('ws:sheet', { section: id }).then((r) => {
+      if (W.sec !== id) return;
+      if (r.ok && r.sheet) { W.sheet = r.sheet; W.note = ''; }
+      else { W.sheet = null; W.note = r.reason || 'This section is not wired up yet.'; }
+      renderSheet(null);
+    });
+  }
+  function enterWorkshop(model) {
+    post('ws:open', { model: model || null }).then((r) => {
+      if (!r.ok) { toast(esc(r.reason || 'The workshop is not available here.'), true); markMode(S.pmode); return; }
+      S.pmode = 'workshop';
+      W.vehicle = r.vehicle || null; W.sections = r.sections || []; W.hex = r.colourHex || {};
+      W.icon = {}; W.sections.forEach((s) => { W.icon[s.id] = s.icon || 'fa-sliders'; });
+      markMode('workshop');
+      chips.hidden = true; list.hidden = true; ws.hidden = false;
+      q.placeholder = PLACE.workshop; q.value = ''; $('#clr').hidden = true;
+      renderHead(); renderNav();
+      if (!W.sections.length) { W.sheet = null; W.note = 'Nothing is switched on in the workshop config.'; renderSheet(null); }
+      else loadSection(W.sections[0].id);
+      setFocus(S.focus);
+      wslist.focus();
+    });
+  }
+  function markMode(m) { document.querySelectorAll('.mode').forEach((b) => b.classList.toggle('on', b.dataset.m === m)); }
+  function setPanelMode(m, model) {
+    if (m === 'workshop') { enterWorkshop(model); return; }
+    S.pmode = 'browse'; markMode('browse');
+    W.sheet = null; W.rows = []; W.sel = -1; W.openKey = null; W.ci = -1;
+    ws.hidden = true; chips.hidden = false; list.hidden = false;
+    q.placeholder = PLACE.browse; q.value = ''; $('#clr').hidden = true;
+    setFocus('type'); refresh(false);
+    setTimeout(() => { q.focus(); }, 20);
+  }
+
+  /* ---------- actions: browse ---------- */
   function act(a) {
     const v = S.rows[S.sel]; if (!v) return;
     if (a === 'spawn' || a === 'beside') {
@@ -142,22 +303,83 @@
         if (S.chip === 'fav') refresh(true); else { const el = rowEl(S.sel); if (el) { el.classList.toggle('fav', r.on); const b = el.querySelector('[data-a=fav]'); if (b) b.innerHTML = (r.on ? 'Unfavorite' : 'Favorite') + ' <kbd>F</kbd>'; } }
       });
     } else if (a === 'shop') {
-      post('workshop', { model: v.model }).then((r) => { if (!r.ok) toast(esc(r.reason || 'Workshop unavailable'), true); });
+      setPanelMode('workshop', v.model);
     } else if (a === 'del') {
       post('delete', {}).then((r) => toast(r.ok ? 'Removed' : esc(r.reason || 'Nothing to remove'), !r.ok));
     }
   }
   function close() { post('close', {}); }
 
+  /* ---------- actions: workshop ---------- */
+  function wsAct(a, i) {
+    const o = W.rows[i]; if (!o) return;
+    if (a === 'toggle') { wsApply(o, !o.value); return; }
+    if (a === 'inc' || a === 'dec') { wsStepOpt(o, a === 'inc' ? 1 : -1); return; }
+    if (a === 'do') { wsApply(o, null); return; }
+    if (a === 'choices') { openChoices(o); return; }
+  }
+  function wsStepOpt(o, d) {
+    if (o.kind !== 'stepper') return;
+    const lo = o.min == null ? -1 : Number(o.min), hi = o.max == null ? 0 : Number(o.max);
+    const v = clamp((Number(o.value) || 0) + d, lo, hi);
+    if (v === Number(o.value)) return;
+    wsApply(o, v);
+  }
+  function openChoices(o) {
+    if (o.kind !== 'pick' && o.kind !== 'colour') return;
+    if (W.openKey === o.key) { W.openKey = null; W.ci = -1; }
+    else {
+      W.openKey = o.key;
+      const cs = o.choices || [];
+      W.ci = cs.findIndex((c) => same(c.value, o.value));
+      if (W.ci < 0) W.ci = cs.length ? 0 : -1;
+    }
+    renderSheet(o.key);
+    const cur = wslist.querySelector('.ch.cur'); if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+  function moveChoice(d) {
+    const o = W.rows.find((x) => x.key === W.openKey); if (!o) return;
+    const els = wslist.querySelectorAll('.ch'); if (!els.length) return;
+    const next = clamp((W.ci < 0 ? 0 : W.ci) + d, 0, els.length - 1);
+    if (els[W.ci]) els[W.ci].classList.remove('cur');
+    W.ci = next; els[next].classList.add('cur'); els[next].scrollIntoView({ block: 'nearest' });
+  }
+  function takeChoice(j) {
+    const o = W.rows.find((x) => x.key === W.openKey); if (!o) return;
+    const c = (o.choices || [])[j]; if (!c) return;
+    wsApply(o, c.value);
+  }
+  function wsEnter() {
+    if (W.openKey != null) { takeChoice(W.ci); return; }
+    const o = W.rows[W.sel]; if (!o) return;
+    if (o.kind === 'toggle') { wsApply(o, !o.value); return; }
+    if (o.kind === 'pick' || o.kind === 'colour') { openChoices(o); return; }
+    if (o.kind === 'action') { wsApply(o, null); return; }
+    if (o.kind === 'stepper') toast('Use <kbd>←</kbd> <kbd>→</kbd> to change the level');
+  }
+
   /* ---------- events ---------- */
-  q.addEventListener('input', () => { $('#clr').hidden = !q.value; debouncedRefresh(); });
-  q.addEventListener('focus', () => setMode('type'));
-  list.addEventListener('focus', () => setMode('browse'));
-  $('#clr').addEventListener('click', () => { q.value = ''; $('#clr').hidden = true; refresh(false); q.focus(); });
+  q.addEventListener('input', () => {
+    $('#clr').hidden = !q.value;
+    if (S.pmode === 'workshop') { W.openKey = null; W.ci = -1; renderSheet(null); } else debouncedRefresh();
+  });
+  q.addEventListener('focus', () => setFocus('type'));
+  list.addEventListener('focus', () => setFocus('browse'));
+  wslist.addEventListener('focus', () => setFocus('browse'));
+  $('#clr').addEventListener('click', () => {
+    q.value = ''; $('#clr').hidden = true;
+    if (S.pmode === 'workshop') renderSheet(null); else refresh(false);
+    q.focus();
+  });
   $('#close').addEventListener('click', close);
-  $('#chips').addEventListener('click', (e) => {
+  $('.modes').addEventListener('click', (e) => {
+    const b = e.target.closest('.mode'); if (!b) return;
+    if (b.dataset.m === S.pmode) return;
+    setPanelMode(b.dataset.m, S.pmode === 'browse' && S.rows[S.sel] ? S.rows[S.sel].model : null);
+  });
+  chips.addEventListener('click', (e) => {
     const c = e.target.closest('.chip'); if (!c) return;
-    S.chip = c.dataset.f; document.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x === c));
+    S.chip = c.dataset.f; chips.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x === c));
     refresh(false); q.focus();
   });
   list.addEventListener('click', (e) => {
@@ -167,17 +389,53 @@
     const i = +r.dataset.i; (i === S.sel && S.open) ? select(i, false) : select(i, true); list.focus();
   });
   list.addEventListener('error', (e) => { if (e.target.tagName !== 'IMG') return; const r = e.target.closest('.row'); const v = r ? S.rows[+r.dataset.i] : null; e.target.parentNode.innerHTML = `<i class="fa-solid ${ICON[(v || {}).type] || 'fa-car-side'}"></i>`; }, true);
-  function move(d) { select(S.sel + d, true); if (S.mode !== 'browse') list.focus(); }
+  $('#wsnav').addEventListener('click', (e) => {
+    const c = e.target.closest('.chip'); if (!c) return;
+    if (c.dataset.s !== W.sec) loadSection(c.dataset.s);
+    wslist.focus();
+  });
+  wslist.addEventListener('click', (e) => {
+    const ch = e.target.closest('.ch');
+    if (ch) { takeChoice(+ch.dataset.c); wslist.focus(); return; }
+    const r = e.target.closest('.row'); if (!r) return;
+    const i = +r.dataset.i;
+    const b = e.target.closest('button[data-a]');
+    if (b) { wsSelect(i); wsAct(b.dataset.a, i); wslist.focus(); return; }
+    if (e.target.closest('.det')) return;
+    wsSelect(i);
+    const o = W.rows[i];
+    if (o && (o.kind === 'pick' || o.kind === 'colour')) openChoices(o);
+    wslist.focus();
+  });
+  function move(d) { select(S.sel + d, true); if (S.focus !== 'browse') list.focus(); }
+
+  function wsKey(e, k, inInput) {
+    if (k === 'Escape') {
+      e.preventDefault();
+      if (W.openKey != null) { W.openKey = null; W.ci = -1; renderSheet(null); } else close();
+      return;
+    }
+    if (k === 'ArrowDown' || k === 'ArrowUp') {
+      e.preventDefault(); const d = k === 'ArrowDown' ? 1 : -1;
+      if (W.openKey != null) moveChoice(d); else { wsSelect(W.sel + d); wslist.focus(); }
+      return;
+    }
+    if (k === 'Enter' || (k === ' ' && !inInput)) { e.preventDefault(); wsEnter(); return; }
+    if (k === 'ArrowRight' || k === 'ArrowLeft') { e.preventDefault(); wsStepOpt(W.rows[W.sel], k === 'ArrowRight' ? 1 : -1); return; }
+    if (inInput) return;                               // typing filters the options
+    if (k === 'Backspace' || k.length === 1) q.focus();
+  }
 
   document.addEventListener('keydown', (e) => {
     if (app.hidden) return;
     const inInput = e.target === q, k = e.key;
+    if (k === 'F7') { e.preventDefault(); close(); return; }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (S.pmode === 'workshop') { wsKey(e, k, inInput); return; }
     if (k === 'ArrowDown') { e.preventDefault(); move(1); return; }
     if (k === 'ArrowUp') { e.preventDefault(); move(-1); return; }
     if (k === 'Enter') { e.preventDefault(); act(e.shiftKey ? 'beside' : 'spawn'); return; }
     if (k === 'Escape') { e.preventDefault(); if (q.value) { q.value = ''; $('#clr').hidden = true; refresh(false); q.focus(); } else close(); return; }
-    if (k === 'F7') { e.preventDefault(); close(); return; }
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (inInput) return; // typing mode: letters are search text
     const acts = { c: 'card', f: 'fav', h: 'hand', w: 'shop', x: 'del' }; const a = acts[k.toLowerCase()];
     if (a) { e.preventDefault(); act(a); return; }
@@ -216,10 +474,14 @@
       S.byModel = {}; (m.vehicles || []).forEach((v) => { S.byModel[v.model] = v; });
       S.total = m.total || 0; S.recent = m.recent || []; S.favs = new Set(m.favorites || []);
       S.deptNames = m.deptNames || {}; S.deptCodes = m.deptCodes || {}; S.catLabels = m.categoryLabels || {};
-      S.chip = 'all'; document.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x.dataset.f === 'all'));
-      q.value = ''; $('#clr').hidden = true;
-      applyGeo(); app.hidden = false; setMode('type'); refresh(false);
-      setTimeout(() => { q.focus(); }, 30);
+      S.chip = 'all'; chips.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x.dataset.f === 'all'));
+      S.pmode = 'browse'; markMode('browse');
+      W.sheet = null; W.rows = []; W.sel = -1; W.openKey = null; W.ci = -1; W.sec = null;
+      ws.hidden = true; chips.hidden = false; list.hidden = false;
+      q.value = ''; q.placeholder = PLACE.browse; $('#clr').hidden = true;
+      applyGeo(); app.hidden = false; setFocus('type'); refresh(false);
+      setTimeout(() => { if (S.pmode === 'browse') q.focus(); }, 30);
+      if (m.mode === 'workshop') setPanelMode('workshop', null);
     } else if (m.action === 'close') {
       app.hidden = true;
     }

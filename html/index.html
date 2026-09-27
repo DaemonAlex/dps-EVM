@@ -14,6 +14,10 @@
     <div id="grip" title="Drag to move"><i class="fa-solid fa-grip-vertical"></i></div>
     <img class="mark" src="nui://wasabi_multichar/ui/build/logo.png" alt="" onerror="this.hidden=true">
     <span class="t">FLEET</span>
+    <div class="modes" role="group" aria-label="Panel mode">
+      <button class="mode on" data-m="browse">Browse</button>
+      <button class="mode" data-m="workshop">Workshop</button>
+    </div>
     <i class="fa-solid fa-magnifying-glass lens"></i>
     <input id="q" type="text" autocomplete="off" spellcheck="false" placeholder="Search a vehicle, a department, a kind… (F7 closes)">
     <button id="clr" class="x" title="Clear" hidden><i class="fa-solid fa-xmark"></i></button>
@@ -35,6 +39,11 @@
       <button class="chip" data-f="sea">Sea</button>
     </div>
     <div id="list" tabindex="0" role="listbox" aria-label="Vehicles"></div>
+    <div id="ws" hidden>
+      <div class="wshead" id="wshead"></div>
+      <div class="wsnav" id="wsnav"></div>
+      <div id="wslist" tabindex="0" role="listbox" aria-label="Workshop options"></div>
+    </div>
     <div class="foot"><span id="hint"></span><span id="hgrip" title="Drag to change height"></span></div>
   </div>
   <div id="toast"></div>
