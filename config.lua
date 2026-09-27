@@ -40,7 +40,7 @@ Config.EnabledModifications = {
     Neon = false,               -- Neon lights (enable for unmarked/undercover units)
     Extras = true,              -- Vehicle extras toggle (lightbars, pushbars, etc.)
     Doors = true,               -- Door controls
-    Repair = true,               -- Vehicle repair functionality
+    Repair = true,              -- Vehicle repair functionality
     Sirens = true,  -- DPS: per-model siren tones for LVC
 }
 
@@ -99,6 +99,7 @@ Config.RepairCosts = {
 -- JOB-SPECIFIC DEFAULTS (v2.1.1+)
 -- Zone-aware menu defaults for better UX
 -----------------------------------------------------------
+-- Group keys (police / fire / ambulance) match Config.JobMappings; these are NOT job names.
 Config.JobDefaults = {
     enabled = true,                    -- Enable zone-specific defaults
     police = {
@@ -119,7 +120,7 @@ Config.JobDefaults = {
         priorityExtras = {1, 2},       -- Lightbar, equipment
         showNeon = false
     },
-    medical = {
+    ambulance = {
         defaultColors = {
             primary = 111,             -- White
             secondary = 27             -- Red accent
