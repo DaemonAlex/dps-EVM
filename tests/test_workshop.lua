@@ -29,3 +29,12 @@ check('damage tyres line', table.concat(lines, '|'):find('2 tyres burst', 1, tru
 cfg.EnabledModifications.Sirens = true
 ids = {} for i, s in ipairs(Workshop.enabledSections(cfg, 'sultan', false)) do ids[i] = s.id end
 check('sirens section present', table.concat(ids, ','):find('sirens'))
+
+-- Task 4: Workshop.liveryChoices merges stock liveries and livery mods (slot 48)
+-- into one labelled list; labels keep numbering across the join.
+local ch = Workshop.liveryChoices(2, 3, { [0] = 'Slicktop' })
+eq('livery choices count', #ch, 5)
+eq('first is named', ch[1].label, 'Slicktop'); eq('first src', ch[1].value.src, 'livery'); eq('first index', ch[1].value.index, 0)
+eq('second default label', ch[2].label, 'Livery 2')
+eq('mod entries follow', ch[3].value.src, 'mod'); eq('mod label numbering continues', ch[3].label, 'Livery 3')
+eq('none when nothing', #Workshop.liveryChoices(0, 0, {}), 0)

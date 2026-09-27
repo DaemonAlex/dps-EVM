@@ -507,3 +507,29 @@ function Workshop.describeDamage(report)
 
     return lines
 end
+
+---Merges the two ways GTA V carries a livery into one list: stock liveries
+---(SetVehicleLivery, index 0..count-1) and livery mods (mod slot 48,
+---index 0..modCount-1). Labels are numbered across the whole merged list, so a
+---vehicle with 2 stock liveries and 3 mods reads Livery 1..5; names[i] (0-based
+---on the merged position) overrides the default label.
+---@param count number stock livery count (GetVehicleLiveryCount)
+---@param modCount number livery-mod count (GetNumVehicleMods veh, 48)
+---@param names table|nil optional labels keyed by merged position, 0-based
+---@return table choices { { value = { src = 'livery'|'mod', index = n }, label = string } }
+function Workshop.liveryChoices(count, modCount, names)
+    count = tonumber(count) or 0
+    modCount = tonumber(modCount) or 0
+    if count < 0 then count = 0 end
+    if modCount < 0 then modCount = 0 end
+    names = names or {}
+    local out = {}
+    for i = 0, count - 1 do
+        out[#out + 1] = { value = { src = 'livery', index = i }, label = names[i] or ('Livery %d'):format(i + 1) }
+    end
+    for j = 0, modCount - 1 do
+        local i = count + j
+        out[#out + 1] = { value = { src = 'mod', index = j }, label = names[i] or ('Livery %d'):format(i + 1) }
+    end
+    return out
+end
