@@ -1,0 +1,634 @@
+{
+ "2vd_fdpatrolboat": {
+  "dept": "lsfd",
+  "kind": "Boat"
+ },
+ "2vd_supervolito": {
+  "dept": "sams",
+  "kind": "Helicopter"
+ },
+ "aleutianems": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "amb_rox_ambu": {
+  "dept": "rmc",
+  "kind": "Cruiser"
+ },
+ "amb_rox_sheriff": {
+  "dept": "rcso",
+  "kind": "Cruiser"
+ },
+ "amb_rox_sheriff2": {
+  "dept": "rcso",
+  "kind": "Cruiser"
+ },
+ "amb_rox_sheriffb": {
+  "dept": "rcso",
+  "kind": "Motorcycle"
+ },
+ "amb_rox_swat": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "amb_rox_towtruck": {
+  "dept": "none",
+  "kind": "Cruiser"
+ },
+ "ambfdtower": {
+  "dept": "rfd",
+  "kind": "Ladder truck"
+ },
+ "ambroxcguardv": {
+  "dept": "uscg",
+  "kind": "Van"
+ },
+ "ambroxfireeng1": {
+  "dept": "rfd",
+  "kind": "Fire engine"
+ },
+ "bccoroner": {
+  "dept": "none",
+  "kind": "Cruiser"
+ },
+ "bfdsuv": {
+  "dept": "lsfd",
+  "kind": "Cruiser"
+ },
+ "cgdinghyr": {
+  "dept": "uscg",
+  "kind": "Boat"
+ },
+ "cghelir": {
+  "dept": "uscg",
+  "kind": "Helicopter"
+ },
+ "cgpredator": {
+  "dept": "uscg",
+  "kind": "Boat"
+ },
+ "coroner": {
+  "dept": "none",
+  "kind": "Van"
+ },
+ "coroner2": {
+  "dept": "none",
+  "kind": "Van"
+ },
+ "ec135med": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "fireboat": {
+  "dept": "lsfd",
+  "kind": "Boat"
+ },
+ "gbemsbisonstx": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "gbemsesperta": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "gbemssteed": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "gbfirevoyager": {
+  "dept": "lsfd",
+  "kind": "Fire engine"
+ },
+ "gbpoladmiral": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolargento7f": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolbanshees": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolbisonhf": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "gbpolbisonstx": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "gbpolclubxr": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolcometcl": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolcomets2r": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpoldomgsx": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolechelon": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpoleon": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolesperta": {
+  "dept": "police",
+  "kind": "Van"
+ },
+ "gbpolgresley": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "gbpolhedra": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolimpaler": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolmojave": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "gbpolprospero": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolscoutgsx": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "gbpolsentinelgts": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolsolace": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolstanier": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolstarlight": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolsteedvan": {
+  "dept": "police",
+  "kind": "Van"
+ },
+ "gbpolsultanrsx": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpoltahomagt": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "gbpolterrorizer": {
+  "dept": "police",
+  "kind": "Tactical"
+ },
+ "gbpoltr3s": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gbpolturismogt": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "gststn1r": {
+  "dept": "rpd",
+  "kind": "Cruiser"
+ },
+ "hvaleutian": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvbf400": {
+  "dept": "police",
+  "kind": "Motorcycle"
+ },
+ "hvbisonhf": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvbravadoxl": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvbrickade2": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvbuffalo14": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvbuffaloxt4": {
+  "dept": "bcso",
+  "kind": "Cruiser"
+ },
+ "hvcanissm2": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvcara2": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvcoqd5": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvdominatorgtr": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvemsnspeedo": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvfdalamo": {
+  "dept": "lsfd",
+  "kind": "SUV / truck"
+ },
+ "hvfdambulance": {
+  "dept": "lsfd",
+  "kind": "Ambulance"
+ },
+ "hvfdbrush": {
+  "dept": "lsfd",
+  "kind": "Brush truck"
+ },
+ "hvfdgrang": {
+  "dept": "lsfd",
+  "kind": "SUV / truck"
+ },
+ "hvfdheavy": {
+  "dept": "lsfd",
+  "kind": "Rescue"
+ },
+ "hvfdladder": {
+  "dept": "lsfd",
+  "kind": "Ladder truck"
+ },
+ "hvfdscout": {
+  "dept": "lsfd",
+  "kind": "SUV / truck"
+ },
+ "hvfdterminus": {
+  "dept": "lsfd",
+  "kind": "SUV / truck"
+ },
+ "hvfdtorrence": {
+  "dept": "lsfd",
+  "kind": "Cruiser"
+ },
+ "hvfdyosemite": {
+  "dept": "lsfd",
+  "kind": "Rescue"
+ },
+ "hvfiretruk": {
+  "dept": "lsfd",
+  "kind": "Fire engine"
+ },
+ "hvfug3": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvgaunt": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvinsurgent": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvkomoda2": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvminimus": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvnagv2": {
+  "dept": "police",
+  "kind": "Motorcycle"
+ },
+ "hvomnisegt": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvpdalamo": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvpdom3": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvpolice3": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvpredator": {
+  "dept": "police",
+  "kind": "Boat"
+ },
+ "hvriot2": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvsafrboat": {
+  "dept": "lsfd",
+  "kind": "Boat"
+ },
+ "hvsamsalamo": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamsaleutian": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamsambulance": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamsboat": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamsbuff4": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamscara": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamsnag": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamsscout": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsamsterminus": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvsandbulance": {
+  "dept": "sams",
+  "kind": "Ambulance"
+ },
+ "hvscout16": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvscout20": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvsentinel5": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvshinobi": {
+  "dept": "police",
+  "kind": "Motorcycle"
+ },
+ "hvstanier": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvswatalamo": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvswatbuffalo4": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvswatdinghy": {
+  "dept": "police_swat",
+  "kind": "Boat"
+ },
+ "hvswatgresly": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvswatrumpo": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvswatspeedo": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvswatsupport": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "hvterminus": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "hvtorrence": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvvigzx2": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "hvyosemite2500": {
+  "dept": "police",
+  "kind": "SUV / truck"
+ },
+ "impalapdlc": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "lore1rb": {
+  "dept": "unsorted",
+  "kind": "Cruiser"
+ },
+ "marbcoprx": {
+  "dept": "rpd",
+  "kind": "Cruiser"
+ },
+ "marbsheriffrx": {
+  "dept": "rcso",
+  "kind": "Cruiser"
+ },
+ "mtlusar": {
+  "dept": "unsorted",
+  "kind": "Cruiser"
+ },
+ "mtlusar1": {
+  "dept": "unsorted",
+  "kind": "Cruiser"
+ },
+ "nkgauntlet4": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "nsandstormmk": {
+  "dept": "unsorted",
+  "kind": "Cruiser"
+ },
+ "ocranger": {
+  "dept": "dfw",
+  "kind": "SUV / truck"
+ },
+ "pcbaranger": {
+  "dept": "dfw",
+  "kind": "SUV / truck"
+ },
+ "pgranger2": {
+  "dept": "dfw",
+  "kind": "SUV / truck"
+ },
+ "polballer3": {
+  "dept": "fib",
+  "kind": "SUV / truck"
+ },
+ "policeboatbb": {
+  "dept": "police",
+  "kind": "Boat"
+ },
+ "prangerbison": {
+  "dept": "dfw",
+  "kind": "SUV / truck"
+ },
+ "raidcoprx": {
+  "dept": "rpd",
+  "kind": "Cruiser"
+ },
+ "rcfdtruk": {
+  "dept": "rfd",
+  "kind": "Fire engine"
+ },
+ "rearmount": {
+  "dept": "lsfd",
+  "kind": "Ladder truck"
+ },
+ "roxbuffalo4": {
+  "dept": "rpd",
+  "kind": "Cruiser"
+ },
+ "roxcpd_modrn_scout": {
+  "dept": "rpd",
+  "kind": "SUV / truck"
+ },
+ "roxcpdbufs": {
+  "dept": "rpd",
+  "kind": "Cruiser"
+ },
+ "roxduneprfir": {
+  "dept": "rfd",
+  "kind": "Fire engine"
+ },
+ "roxe109lguard": {
+  "dept": "none",
+  "kind": "Cruiser"
+ },
+ "roxgrang2fdcom": {
+  "dept": "rfd",
+  "kind": "Command"
+ },
+ "roxissimedic": {
+  "dept": "rmc",
+  "kind": "Cruiser"
+ },
+ "roxlguardcara": {
+  "dept": "none",
+  "kind": "Cruiser"
+ },
+ "roxpdconada3": {
+  "dept": "rpd",
+  "kind": "Helicopter"
+ },
+ "roxpolmav": {
+  "dept": "rpd",
+  "kind": "Helicopter"
+ },
+ "roxrumpofirdep": {
+  "dept": "rfd",
+  "kind": "Van"
+ },
+ "roxsandkparkr": {
+  "dept": "dfw",
+  "kind": "SUV / truck"
+ },
+ "roxsheriffgres": {
+  "dept": "rcso",
+  "kind": "SUV / truck"
+ },
+ "roxsherifrumpv": {
+  "dept": "rcso",
+  "kind": "Cruiser"
+ },
+ "roxterl300": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "roxv450ambu": {
+  "dept": "rmc",
+  "kind": "Cruiser"
+ },
+ "roxyosfdbrush": {
+  "dept": "rfd",
+  "kind": "Brush truck"
+ },
+ "spvhjv": {
+  "dept": "unsorted",
+  "kind": "Cruiser"
+ },
+ "surferpdb": {
+  "dept": "police",
+  "kind": "Cruiser"
+ },
+ "swatvanr2": {
+  "dept": "police_swat",
+  "kind": "Tactical"
+ },
+ "tiller": {
+  "dept": "lsfd",
+  "kind": "Ladder truck"
+ },
+ "tillertrailer": {
+  "dept": "lsfd",
+  "kind": "Ladder truck"
+ },
+ "unbuffalo4": {
+  "dept": "fib",
+  "kind": "Unmarked"
+ },
+ "vd_boat": {
+  "dept": "unsorted",
+  "kind": "Boat"
+ },
+ "vors": {
+  "dept": "unsorted",
+  "kind": "Cruiser"
+ }
+}

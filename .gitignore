@@ -1,2 +1,1 @@
-*.bak
-*.bak-*
+data/fleet_state.json

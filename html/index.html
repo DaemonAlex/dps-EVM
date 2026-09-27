@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DPS Fleet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" hidden>
+  <div id="bar" role="dialog" aria-label="DPS Fleet">
+    <div id="grip" title="Drag to move"><i class="fa-solid fa-grip-vertical"></i></div>
+    <img class="mark" src="nui://wasabi_multichar/ui/build/logo.png" alt="" onerror="this.hidden=true">
+    <span class="t">FLEET</span>
+    <i class="fa-solid fa-magnifying-glass lens"></i>
+    <input id="q" type="text" autocomplete="off" spellcheck="false" placeholder="Search a vehicle, a department, a kind… (F7 closes)">
+    <button id="clr" class="x" title="Clear" hidden><i class="fa-solid fa-xmark"></i></button>
+    <span id="cnt" class="cnt"></span>
+    <button id="close" class="x" title="Close (Esc)"><i class="fa-solid fa-xmark"></i></button>
+    <div id="wgrip" title="Drag to widen"></div>
+  </div>
+  <div id="panel">
+    <div class="chips" id="chips">
+      <button class="chip on" data-f="all">All</button>
+      <button class="chip" data-f="recent">Recent</button>
+      <button class="chip" data-f="fav" title="Favorites"><i class="fa-solid fa-star"></i></button>
+      <button class="chip" data-f="street">Street</button>
+      <button class="chip" data-f="bikes">Bikes</button>
+      <button class="chip" data-f="racing">Racing</button>
+      <button class="chip" data-f="emergency">Emergency</button>
+      <button class="chip" data-f="work">Work</button>
+      <button class="chip" data-f="air">Air</button>
+      <button class="chip" data-f="sea">Sea</button>
+    </div>
+    <div id="list" tabindex="0" role="listbox" aria-label="Vehicles"></div>
+    <div class="foot"><span id="hint"></span><span id="hgrip" title="Drag to change height"></span></div>
+  </div>
+  <div id="toast"></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
