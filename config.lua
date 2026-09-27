@@ -14,6 +14,13 @@ Config.DisableZoneRestrictions = true  -- DSRP 2026-08-22: zones OFF — emergen
 -- though they are listed here.
 Config.ManualJobSystem = true
 
+-- Drop-in job access (DPS 2026-09-27). With AutoJobs the workshop job set is derived
+-- at resource start from exports.qbx_core:GetJobs(), so a new department needs no edit here.
+Config.AutoJobs = true                     -- true: every job whose type is 'leo' or 'ems' may use the workshop
+Config.ExtraWorkshopJobs = { 'mechanic' }  -- extra job names added to the derived set (not LEO/EMS typed)
+Config.AutoAces = true                     -- true: grant the dps.fleet ace to group.admin and group.tester at start when missing
+-- Config.JobMappings below is only read when Config.AutoJobs = false.
+
 -- Job name mappings — MUST match qbx_core/shared/jobs.lua on this server.
 -- DPS runs six LEO agencies (2026-08-28 audit): police (LSPD), bcso, sasp,
 -- fib, doc, dfw. Fire+EMS are lsfd and ambulance. The old list carried names
@@ -189,7 +196,17 @@ Config.CustomLiveries = {
         {name = "LSPD Slicktop", file = "liveries/police_livery2.yft"},
         {name = "BCSO Standard", file = "liveries/police_livery3.yft"}
     },
-    ["ambulance"] = {
+    -- DPS 2026-09-27: the vendor key 'ambulance' is not a name on this server; the
+    -- medical set is sams (field EMS) / omc (LS hospital) / rmc (Roxwood hospital).
+    ["sams"] = {
+        {name = "EMS Standard", file = "liveries/ambulance_livery1.yft"},
+        {name = "Fire Department", file = "liveries/ambulance_fire.yft"}
+    },
+    ["omc"] = {
+        {name = "EMS Standard", file = "liveries/ambulance_livery1.yft"},
+        {name = "Fire Department", file = "liveries/ambulance_fire.yft"}
+    },
+    ["rmc"] = {
         {name = "EMS Standard", file = "liveries/ambulance_livery1.yft"},
         {name = "Fire Department", file = "liveries/ambulance_fire.yft"}
     }

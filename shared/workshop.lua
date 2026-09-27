@@ -16,16 +16,28 @@ local function jobSet(cfg)
     return set
 end
 
+---The access rule itself, over an already-built job set. The server derives that
+---set from qbx_core at start (Config.AutoJobs), so the rule must not read config.
+---@param jobName string|nil
+---@param isAdmin boolean
+---@param set table<string, boolean> job names allowed to use the workshop
+---@param restrictionsOn boolean false = the workshop is open to everyone
+---@return boolean ok, string|nil reason
+function Access.canWorkshopSet(jobName, isAdmin, set, restrictionsOn)
+    if restrictionsOn == false then return true end
+    if not jobName then return false, 'Your character is not loaded yet.' end
+    if isAdmin then return true end
+    if set and set[jobName] then return true end
+    return false, 'Your job does not permit vehicle modifications.'
+end
+
+---Config.JobMappings form of the rule above (Config.AutoJobs = false, and the client).
 ---@param jobName string|nil
 ---@param isAdmin boolean
 ---@param cfg table
 ---@return boolean ok, string|nil reason
 function Access.canWorkshop(jobName, isAdmin, cfg)
-    if cfg.EnableJobRestrictions == false then return true end
-    if not jobName then return false, 'Your character is not loaded yet.' end
-    if isAdmin then return true end
-    if jobSet(cfg)[jobName] then return true end
-    return false, 'Your job does not permit vehicle modifications.'
+    return Access.canWorkshopSet(jobName, isAdmin, jobSet(cfg), cfg.EnableJobRestrictions ~= false)
 end
 
 -----------------------------------------------------------------------
@@ -447,6 +459,25 @@ function Workshop.repairPrice(kind, jobName, cfg)
         if entry.job == jobName then discount = entry.discount; break end
     end
     return math.floor(base * (1 - discount) + 0.5)
+end
+
+---Which account pays and how much, or nil when nothing can cover it. 'bank' and
+---'both' try the bank first and fall back to cash; 'cash' never reaches the bank.
+---A free repair returns amount 0 so the caller skips RemoveMoney but still succeeds.
+---@param price number
+---@param bank number
+---@param cash number
+---@param chargeFrom string 'bank'|'cash'|'both'
+---@return table|nil plan { account = 'bank'|'cash', amount = number }
+function Workshop.chargePlan(price, bank, cash, chargeFrom)
+    price = tonumber(price) or 0
+    local have = { bank = tonumber(bank) or 0, cash = tonumber(cash) or 0 }
+    local order = chargeFrom == 'cash' and { 'cash' } or { 'bank', 'cash' }
+    if price <= 0 then return { account = order[1], amount = 0 } end
+    for _, account in ipairs(order) do
+        if have[account] >= price then return { account = account, amount = price } end
+    end
+    return nil
 end
 
 ---@param kind string 'personal'|'job'

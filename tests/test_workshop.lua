@@ -38,3 +38,15 @@ eq('first is named', ch[1].label, 'Slicktop'); eq('first src', ch[1].value.src, 
 eq('second default label', ch[2].label, 'Livery 2')
 eq('mod entries follow', ch[3].value.src, 'mod'); eq('mod label numbering continues', ch[3].label, 'Livery 3')
 eq('none when nothing', #Workshop.liveryChoices(0, 0, {}), 0)
+
+-- Task 6: Workshop.chargePlan(price, bank, cash, chargeFrom) -> { account, amount } | nil
+-- 'bank' and 'both' both fall back to cash; 'cash' never reaches the bank.
+local plan = Workshop.chargePlan(375, 0, 400, 'bank')
+eq('bank empty falls to cash', plan.account, 'cash'); eq('amount', plan.amount, 375)
+eq('bank has it', Workshop.chargePlan(375, 1000, 0, 'bank').account, 'bank')
+eq('cash only', Workshop.chargePlan(100, 1000, 50, 'cash'), nil)
+eq('free', Workshop.chargePlan(0, 0, 0, 'bank').amount, 0)
+eq('both prefers bank', Workshop.chargePlan(100, 100, 100, 'both').account, 'bank')
+eq('nothing anywhere', Workshop.chargePlan(100, 10, 10, 'both'), nil)
+eq('exact bank balance pays', Workshop.chargePlan(100, 100, 0, 'bank').account, 'bank')
+eq('cash pays from cash', Workshop.chargePlan(100, 0, 100, 'cash').account, 'cash')
