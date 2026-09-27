@@ -36,13 +36,14 @@ Config.ManualJobSystem = true
 -- fib, doc, dfw. Fire+EMS are lsfd and ambulance. The old list carried names
 -- that don't exist here (sahp/saspr/statepolice/trooper/lspd/sheriff), which
 -- locked SASP/FIB/DOC/DFW out of the menu entirely.
--- NOTE: no mechanic group here on purpose — JobMappings drives MENU access
--- (police+fire+ambulance groups only). Mechanic repair pricing comes from
+-- DPS 2026-09-27: the mechanic group is IN (Damon: "EVM any vehicle" for admins and mechanics); JobMappings drives MENU access
+-- (police+fire+ambulance+mechanic). Mechanic repair pricing comes from
 -- Config.RepairCosts.freeForJobs, which is a separate list.
-Config.JobMappings = {
-    police = {'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw'},
-    fire = {'lsfd'},
-    ambulance = {'ambulance'}
+Config.JobMappings = { -- DPS 2026-09-25: group keys, not job names. Every LEO / fire / medical job listed.
+    police = {'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg'},
+    fire = {'lsfd', 'rfd'},
+    ambulance = {'sams', 'omc', 'rmc'},
+    mechanic = {'mechanic'}
 }
 
 -----------------------------------------------------------
@@ -144,11 +145,11 @@ Config.ManualModificationZones = {
 
     -- Medical/EMS
     {
-        name = "Pillbox Hill Medical Center",
-        coords = vector3(338.5, -580.3, 28.8),
+        name = "Ocean Medical Center", -- DPS 2026-09-25: the LS hospital is the OMC MLO, not vanilla Pillbox; staff locker room coords
+        coords = vector3(-1809.38, -357.82, 49.47),
         radius = 25.0,
         type = "medical",
-        requiredJob = "ambulance",
+        requiredJob = "ambulance", -- JobMappings group key (sams, omc, rmc), not a job name
         minGrade = 0,
         jobLabel = "EMS Personnel"
     },
@@ -157,7 +158,7 @@ Config.ManualModificationZones = {
         coords = vector3(1835.2, 3678.9, 34.3),
         radius = 20.0,
         type = "medical",
-        requiredJob = "ambulance",
+        requiredJob = "ambulance", -- JobMappings group key (sams, omc, rmc), not a job name
         minGrade = 0,
         jobLabel = "EMS Personnel"
     },
@@ -314,7 +315,7 @@ function Config.AutoConfigureJobSystem()
     Config.JobMappings = {
         police = {"police", "bcso", "sasp", "fib", "doc", "dfw"},
         fire = {"lsfd"},
-        ambulance = {"ambulance"}
+        ambulance = {"sams", "omc", "rmc"}
     }
     
     if Config.Debug then
@@ -418,7 +419,7 @@ function Config.AutoConfigureZones()
             coords = vector3(338.5, -580.3, 28.8),
             radius = 4.0,
             type = "medical",
-            requiredJob = "ambulance",
+            requiredJob = "sams",
             minGrade = 4,
             jobLabel = "EMS Personnel"
         },
@@ -427,7 +428,7 @@ function Config.AutoConfigureZones()
             coords = vector3(1835.2, 3678.9, 34.3),
             radius = 4.0,
             type = "medical",
-            requiredJob = "ambulance",
+            requiredJob = "sams",
             minGrade = 4,
             jobLabel = "EMS Personnel"
         }
@@ -473,7 +474,7 @@ Config.UndercoverNeon = {
 -- Other display settings
 Config.ShowBlips = false        -- Show modification zone blips on map
 Config.ShowMarkers = false      -- Show ground markers at zones
-Config.EmergencyVehiclesOnly = true   -- DSRP: only emergency vehicles may be modified
+Config.EmergencyVehiclesOnly = false  -- DSRP 2026-09-06: open to ALL vehicles (job restriction still enforced server-side)
 
 -----------------------------------------------------------
 -- THIRD-PARTY SCRIPT COMPATIBILITY (v2.1.2+)
@@ -556,8 +557,14 @@ Config.RepairCosts = {
         {job = 'fib', discount = 0.25},
         {job = 'doc', discount = 0.25},
         {job = 'dfw', discount = 0.25},
+        {job = 'rpd', discount = 0.25},
+        {job = 'rcso', discount = 0.25},
+        {job = 'uscg', discount = 0.25},
         {job = 'lsfd', discount = 0.25},
-        {job = 'ambulance', discount = 0.25}
+        {job = 'rfd', discount = 0.25},
+        {job = 'sams', discount = 0.25}, -- DPS 2026-09-25: medical set (was vendor 'ambulance')
+        {job = 'omc', discount = 0.25},
+        {job = 'rmc', discount = 0.25}
     }
 }
 
@@ -610,7 +617,8 @@ Config.FieldRepair = {
     allowedJobs = {                    -- Jobs that can use field repair (real DPS jobs only;
                                        -- no mechanic: field repair is reached through the menu,
                                        -- which is emergency-jobs-only)
-        'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'lsfd', 'ambulance'
+        'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg',
+        'lsfd', 'rfd', 'sams', 'omc', 'rmc' -- DPS 2026-09-25: was '... lsfd, ambulance'
     },
     minGrade = 0,                      -- Minimum job grade (0 = any grade)
     maxEngineRepair = 350.0,           -- Max engine health from field repair (see Constants.ENGINE_MAX_FIELD_REPAIR)
