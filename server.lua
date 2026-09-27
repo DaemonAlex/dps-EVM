@@ -456,8 +456,12 @@ local function ensureTables()
     -- MariaDB syntax; it fails harmlessly if the table already holds duplicates.
     local keyOk = db('ensureTables uq_model_livery', MySQL.query.await,
         'ALTER TABLE custom_liveries ADD UNIQUE KEY IF NOT EXISTS uq_model_livery (vehicle_model, livery_name)')
+    if not keyOk then failed[#failed + 1] = 'uq_model_livery' end
     lib.print.info(('workshop tables ready: %s (uq_model_livery %s)'):format(
         table.concat(made, ' '), keyOk and 'ok' or 'FAILED'))
+    if not keyOk then
+        lib.print.warn('uq_model_livery is missing: duplicate custom livery names are only caught in memory, not by the database')
+    end
     if #failed > 0 then lib.print.warn(('workshop tables FAILED: %s'):format(table.concat(failed, ' '))) end
     return #failed == 0
 end
@@ -515,7 +519,7 @@ RegisterNetEvent('vehiclemods:server:applyCustomLivery', function(netId, modelNa
     if not veh then
         return notify(src, 'Custom livery', 'That vehicle is not in reach.', 'error')
     end
-    if not vehicleIsModel(veh, modelName) then
+    if not vehicleIsModel(veh, model) then
         return notify(src, 'Custom livery', 'That livery belongs to a different vehicle.', 'error')
     end
     if not Workshop.isSafeLiveryFile(liveryFile) then
@@ -583,22 +587,30 @@ RegisterNetEvent('vehiclemods:server:removeCustomLivery', function(modelName, li
         return notify(src, 'Custom livery', 'That livery name is not valid.', 'error')
     end
 
-    local list = liveriesFor(model)
-    local at
-    for i, entry in ipairs(list) do
-        if entry.name == liveryName then at = i; break end
-    end
-    if not at then
-        return notify(src, 'Custom livery', ('%s has no livery called "%s".'):format(model, liveryName), 'error')
-    end
+    underLock(src, 'removeCustomLivery', function()
+        local function indexOf()
+            for i, entry in ipairs(liveriesFor(model)) do
+                if entry.name == liveryName then return i end
+            end
+            return nil
+        end
 
-    -- the row goes first: a failed DELETE must not leave the store out of step
-    local ok = db('removeCustomLivery', MySQL.query.await,
-        'DELETE FROM custom_liveries WHERE LOWER(vehicle_model) = ? AND livery_name = ?', { model, liveryName })
-    if not ok then return dbFailed(src) end
-    table.remove(list, at)
-    notify(src, 'Custom livery removed', ('"%s" removed from %s.'):format(liveryName, model), 'success')
-    lib.print.info(('custom livery "%s" removed from %s by src %s'):format(liveryName, model, src))
+        if not indexOf() then
+            return notify(src, 'Custom livery', ('%s has no livery called "%s".'):format(model, liveryName), 'error')
+        end
+
+        -- the row goes first: a failed DELETE must not leave the store out of step
+        local ok = db('removeCustomLivery', MySQL.query.await,
+            'DELETE FROM custom_liveries WHERE LOWER(vehicle_model) = ? AND livery_name = ?', { model, liveryName })
+        if not ok then return dbFailed(src) end
+
+        -- the DELETE yields, so the index found before it is stale: look the entry up
+        -- again rather than removing whatever now sits at the old position
+        local at = indexOf()
+        if at then table.remove(liveriesFor(model), at) end
+        notify(src, 'Custom livery removed', ('"%s" removed from %s.'):format(liveryName, model), 'success')
+        lib.print.info(('custom livery "%s" removed from %s by src %s'):format(liveryName, model, src))
+    end)
 end)
 
 lib.callback.register('dps-fleet:server:customLiveries', function(source, modelName)
