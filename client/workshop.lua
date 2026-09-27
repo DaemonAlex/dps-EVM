@@ -19,7 +19,7 @@
     SetVehicleModKit runs once per apply, and the colour list is built once.
 
     Ported from legacy/evm_client.lua: liveries 336-499, custom liveries 502-726,
-    performance 891-1050, extras 1053-1099, doors 1102-1176, windows 1182-1299,
+    performance 891-1050, extras 1053-1099, doors 1102-1176, windows 1182-1304,
     seats 1305-1457, tint 1506-1554, neon 1557-1730, colours 1733-1910,
     wheels 1913-2083, properties 2148-2362, presets 2989-3198,
     livery memory 3208-3233 and livery labels 3444-3510.
@@ -568,13 +568,32 @@ local function sheetDoors(veh)
     return options
 end
 
-local function sheetWindows()
-    return {
+-- EVM's smash-window list (legacy 1260-1290): an extraction tool, kept.
+local SMASH_WINDOWS = {
+    { index = 0, label = 'front left' },
+    { index = 1, label = 'front right' },
+    { index = 2, label = 'rear left' },
+    { index = 3, label = 'rear right' },
+}
+local SMASH_LABEL = {}
+for _, w in ipairs(SMASH_WINDOWS) do SMASH_LABEL[w.index] = w.label end
+
+local function sheetWindows(veh)
+    local options = {
         { key = 'down_front', label = 'Front windows down', kind = 'action', value = true },
         { key = 'up_front', label = 'Front windows up', kind = 'action', value = true },
         { key = 'down_rear', label = 'Rear windows down', kind = 'action', value = true },
         { key = 'up_rear', label = 'Rear windows up', kind = 'action', value = true },
     }
+    for _, w in ipairs(SMASH_WINDOWS) do
+        options[#options + 1] = {
+            key = 'smash:' .. w.index,
+            label = ('Smash %s window'):format(w.label),
+            kind = 'action',
+            value = IsVehicleWindowIntact(veh, w.index) == true,
+        }
+    end
+    return options
 end
 
 local function seatLabel(i)
@@ -885,6 +904,14 @@ local WINDOW_ACTIONS = {
 }
 
 function APPLY.windows(veh, key)
+    local smash = tonumber(key:match('^smash:(%d+)$'))
+    if smash then
+        if not SMASH_LABEL[smash] then return false, 'Unknown window.' end
+        if IsVehicleWindowIntact(veh, smash) == false then return false, 'That window is already broken.' end
+        SmashVehicleWindow(veh, smash)
+        return true, ('Smashed the %s window.'):format(SMASH_LABEL[smash])
+    end
+
     local action = WINDOW_ACTIONS[key]
     if not action then return false, 'Unknown window option.' end
     for _, index in ipairs(action.windows) do
@@ -962,7 +989,8 @@ function APPLY.repair(veh, key)
 
     if key ~= 'emergency' and key ~= 'full' and key ~= 'field' then return false, 'Unknown repair option.' end
     local ok, message = RepairClient.run(veh, key)
-    return ok ~= false, message
+    if ok ~= true then return false, message or 'Repair did not run.' end
+    return true, message
 end
 
 ---@param veh number
