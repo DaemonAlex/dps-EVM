@@ -13,9 +13,10 @@ end
 
 dofile('shared/fields.lua')
 dofile('shared/groups.lua')
+dofile('shared/workshop.lua')
 dofile('shared/search.lua')
 
-local files = { 'tests/test_search.lua', 'tests/test_card.lua', 'tests/test_sections.lua' }
+local files = { 'tests/test_search.lua', 'tests/test_card.lua', 'tests/test_sections.lua', 'tests/test_access.lua' }
 for _, f in ipairs(files) do
     print('== ' .. f)
     local ok, err = pcall(dofile, f)

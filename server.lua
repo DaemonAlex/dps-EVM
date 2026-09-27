@@ -80,6 +80,30 @@ end
 
 local function allowed(src) return IsPlayerAceAllowed(src, 'dps.fleet') end
 
+---Job name and grade level for a connected player, or nil if not loaded.
+---@param src number
+---@return string|nil jobName, number grade
+local function playerJob(src)
+    local player = exports.qbx_core:GetPlayer(src)
+    if not player then return nil end
+    local job = player.PlayerData and player.PlayerData.job
+    if not job then return nil end
+    return job.name, (job.grade and job.grade.level) or 0
+end
+
+---Whether a player may open the workshop (EVM) panel.
+---@param src number
+---@return boolean ok, string|nil reason
+local function canWorkshop(src)
+    local jobName = playerJob(src)
+    return Access.canWorkshop(jobName, IsPlayerAceAllowed(src, 'command'), Config)
+end
+
+lib.callback.register('dps-fleet:server:workshopAccess', function(source)
+    local ok, why = canWorkshop(source)
+    return ok, why
+end)
+
 lib.callback.register('dps-fleet:server:open', function(source, alreadyHasData)
     if not allowed(source) then return false end
     if alreadyHasData then return true end
