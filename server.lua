@@ -209,6 +209,10 @@ local CUSTOM_LIVERIES = {}
 -- src -> os.time() of the last completed field repair. Plain table, no timers.
 local fieldRepairCooldowns = {}
 
+-- src -> true while a check-then-write is in flight. Two fast clicks would
+-- otherwise both pass the limit/duplicate check before either row lands.
+local busy = {}
+
 ---@param src number
 ---@param title string
 ---@param description string
@@ -217,6 +221,56 @@ local function notify(src, title, description, kind)
     TriggerClientEvent('ox_lib:notify', src, {
         title = title, description = description, type = kind or 'inform', duration = 5000,
     })
+end
+
+---A guarded MySQL await: the database going away must not kill a handler.
+---Logs one warn line naming the handler so the console points straight at it.
+---@param what string handler name for the log line
+---@param fn function MySQL.<method>.await
+---@param ... any query, parameters
+---@return boolean ok, any result
+local function db(what, fn, ...)
+    local ok, result = pcall(fn, ...)
+    if not ok then
+        lib.print.warn(('%s: database error — %s'):format(what, tostring(result)))
+        return false, nil
+    end
+    return true, result
+end
+
+---The one wording every write path uses when the database refuses.
+---@param src number
+local function dbFailed(src)
+    TriggerClientEvent('ox_lib:notify', src, {
+        title = 'Workshop', description = 'Could not save that right now.', type = 'error',
+    })
+end
+
+---Runs a check-then-write section under the per-player lock, so the lock is
+---released whether the body returns, refuses or throws.
+---@param src number
+---@param what string handler name for the log line
+---@param body function
+local function underLock(src, what, body)
+    if busy[src] then
+        return notify(src, 'Workshop', 'Hold on — the last change is still saving.', 'error')
+    end
+    busy[src] = true
+    local ran, err = pcall(body)
+    busy[src] = nil
+    if not ran then
+        lib.print.warn(('%s: failed — %s'):format(what, tostring(err)))
+        dbFailed(src)
+    end
+end
+
+---Model hashes: the natives and joaat disagree on sign for hashes above 2^31,
+---so both sides are normalised to unsigned 32-bit before comparing.
+---@param veh number
+---@param modelName string
+---@return boolean
+local function vehicleIsModel(veh, modelName)
+    return (GetEntityModel(veh) % 0x100000000) == (joaat(modelName) % 0x100000000)
 end
 
 ---@param model any
@@ -394,10 +448,16 @@ local WORKSHOP_TABLE_ORDER = { 'custom_liveries', 'vehicle_mods', 'vehicle_prese
 local function ensureTables()
     local made, failed = {}, {}
     for _, name in ipairs(WORKSHOP_TABLE_ORDER) do
-        local ok = pcall(MySQL.query.await, WORKSHOP_TABLES[name])
+        local ok = db('ensureTables ' .. name, MySQL.query.await, WORKSHOP_TABLES[name])
         if ok then made[#made + 1] = name else failed[#failed + 1] = name end
     end
-    lib.print.info(('workshop tables ready: %s'):format(table.concat(made, ' ')))
+    -- One custom livery name per model is a database rule, not a race: with this key
+    -- INSERT IGNORE in addCustomLivery reports affectedRows 0 instead of a second row.
+    -- MariaDB syntax; it fails harmlessly if the table already holds duplicates.
+    local keyOk = db('ensureTables uq_model_livery', MySQL.query.await,
+        'ALTER TABLE custom_liveries ADD UNIQUE KEY IF NOT EXISTS uq_model_livery (vehicle_model, livery_name)')
+    lib.print.info(('workshop tables ready: %s (uq_model_livery %s)'):format(
+        table.concat(made, ' '), keyOk and 'ok' or 'FAILED'))
     if #failed > 0 then lib.print.warn(('workshop tables FAILED: %s'):format(table.concat(failed, ' '))) end
     return #failed == 0
 end
@@ -416,7 +476,12 @@ local function loadCustomLiveries()
         end
     end
 
-    local rows = MySQL.query.await('SELECT vehicle_model, livery_name, livery_file FROM custom_liveries')
+    local ok, rows = db('loadCustomLiveries', MySQL.query.await,
+        'SELECT vehicle_model, livery_name, livery_file FROM custom_liveries')
+    if not ok then
+        lib.print.info(('custom liveries: %d from config, database unavailable'):format(seeded))
+        return
+    end
     local loaded = 0
     for _, row in ipairs(rows or {}) do
         local model = validModel(row.vehicle_model)
@@ -446,8 +511,12 @@ RegisterNetEvent('vehiclemods:server:applyCustomLivery', function(netId, modelNa
     if not canWorkshop(src) then return notify(src, 'Access denied', 'You may not modify vehicles.', 'error') end
     local model = validModel(modelName)
     if not model then return notify(src, 'Custom livery', 'That vehicle model is not valid.', 'error') end
-    if not resolveCallerVehicle(src, netId) then
+    local veh = resolveCallerVehicle(src, netId)
+    if not veh then
         return notify(src, 'Custom livery', 'That vehicle is not in reach.', 'error')
+    end
+    if not vehicleIsModel(veh, modelName) then
+        return notify(src, 'Custom livery', 'That livery belongs to a different vehicle.', 'error')
     end
     if not Workshop.isSafeLiveryFile(liveryFile) then
         return notify(src, 'Custom livery', 'That livery file is not allowed.', 'error')
@@ -479,21 +548,30 @@ RegisterNetEvent('vehiclemods:server:addCustomLivery', function(modelName, liver
         return notify(src, 'Custom livery', 'That livery file is not allowed.', 'error')
     end
 
-    local list = liveriesFor(model)
-    if #list >= MAX_LIVERIES_PER_MODEL then
-        return notify(src, 'Custom livery', ('%s already has the maximum of %d custom liveries.'):format(model, MAX_LIVERIES_PER_MODEL), 'error')
-    end
-    for _, entry in ipairs(list) do
-        if entry.name == name then
+    underLock(src, 'addCustomLivery', function()
+        local list = liveriesFor(model)
+        if #list >= MAX_LIVERIES_PER_MODEL then
+            return notify(src, 'Custom livery', ('%s already has the maximum of %d custom liveries.'):format(model, MAX_LIVERIES_PER_MODEL), 'error')
+        end
+        for _, entry in ipairs(list) do
+            if entry.name == name then
+                return notify(src, 'Custom livery', ('%s already has a livery called "%s".'):format(model, name), 'error')
+            end
+        end
+
+        -- INSERT IGNORE + the unique key: the database, not this check, decides.
+        local ok, affected = db('addCustomLivery', MySQL.update.await,
+            'INSERT IGNORE INTO custom_liveries (vehicle_model, livery_name, livery_file) VALUES (?, ?, ?)',
+            { model, name, liveryFile })
+        if not ok then return dbFailed(src) end
+        if (tonumber(affected) or 0) == 0 then
             return notify(src, 'Custom livery', ('%s already has a livery called "%s".'):format(model, name), 'error')
         end
-    end
 
-    MySQL.insert.await('INSERT INTO custom_liveries (vehicle_model, livery_name, livery_file) VALUES (?, ?, ?)',
-        { model, name, liveryFile })
-    list[#list + 1] = { name = name, file = liveryFile }
-    notify(src, 'Custom livery added', ('"%s" added for %s.'):format(name, model), 'success')
-    lib.print.info(('custom livery "%s" (%s) added for %s by src %s'):format(name, liveryFile, model, src))
+        list[#list + 1] = { name = name, file = liveryFile }
+        notify(src, 'Custom livery added', ('"%s" added for %s.'):format(name, model), 'success')
+        lib.print.info(('custom livery "%s" (%s) added for %s by src %s'):format(name, liveryFile, model, src))
+    end)
 end)
 
 RegisterNetEvent('vehiclemods:server:removeCustomLivery', function(modelName, liveryName)
@@ -506,15 +584,19 @@ RegisterNetEvent('vehiclemods:server:removeCustomLivery', function(modelName, li
     end
 
     local list = liveriesFor(model)
-    local removed = false
+    local at
     for i, entry in ipairs(list) do
-        if entry.name == liveryName then table.remove(list, i); removed = true; break end
+        if entry.name == liveryName then at = i; break end
     end
-    if not removed then
+    if not at then
         return notify(src, 'Custom livery', ('%s has no livery called "%s".'):format(model, liveryName), 'error')
     end
 
-    MySQL.query.await('DELETE FROM custom_liveries WHERE LOWER(vehicle_model) = ? AND livery_name = ?', { model, liveryName })
+    -- the row goes first: a failed DELETE must not leave the store out of step
+    local ok = db('removeCustomLivery', MySQL.query.await,
+        'DELETE FROM custom_liveries WHERE LOWER(vehicle_model) = ? AND livery_name = ?', { model, liveryName })
+    if not ok then return dbFailed(src) end
+    table.remove(list, at)
     notify(src, 'Custom livery removed', ('"%s" removed from %s.'):format(liveryName, model), 'success')
     lib.print.info(('custom livery "%s" removed from %s by src %s'):format(liveryName, model, src))
 end)
@@ -541,10 +623,11 @@ RegisterNetEvent('vehiclemods:server:saveModifications', function(modelName, pro
         return notify(src, 'Vehicle setup', 'That setup is too large to save.', 'error')
     end
 
-    MySQL.query.await([[
+    local ok = db('saveModifications', MySQL.query.await, [[
         INSERT INTO vehicle_mods (vehicle_model, extras, player_id) VALUES (?, ?, ?)
         ON DUPLICATE KEY UPDATE extras = VALUES(extras), player_id = VALUES(player_id)
     ]], { model, encoded, tostring(citizenidOf(src) or src) })
+    if not ok then return dbFailed(src) end
     lib.print.info(('vehicle_mods saved for %s by src %s (%d bytes)'):format(model, src, #encoded))
 end)
 
@@ -552,8 +635,9 @@ lib.callback.register('dps-fleet:server:vehicleConfig', function(source, modelNa
     if not canWorkshop(source) then return false end
     local model = validModel(modelName)
     if not model then return false end
-    local row = MySQL.single.await('SELECT extras FROM vehicle_mods WHERE LOWER(vehicle_model) = ? LIMIT 1', { model })
-    if not row then return false end
+    local ok, row = db('vehicleConfig', MySQL.single.await,
+        'SELECT extras FROM vehicle_mods WHERE LOWER(vehicle_model) = ? LIMIT 1', { model })
+    if not ok or not row then return false end
     return decodeJson(row.extras) or false
 end)
 
@@ -588,27 +672,33 @@ RegisterNetEvent('vehiclemods:server:savePreset', function(presetName, modelName
         jobPreset = jobName
     end
 
-    local countRow
-    if kind == 'job' then
-        countRow = MySQL.single.await('SELECT COUNT(*) AS n FROM vehicle_presets WHERE job_preset = ?', { jobPreset })
-    else
-        countRow = MySQL.single.await('SELECT COUNT(*) AS n FROM vehicle_presets WHERE owner_identifier = ? AND job_preset IS NULL', { identifier })
-    end
-    local count = countRow and tonumber(countRow.n) or 0
+    underLock(src, 'savePreset', function()
+        local countOk, countRow
+        if kind == 'job' then
+            countOk, countRow = db('savePreset count', MySQL.single.await,
+                'SELECT COUNT(*) AS n FROM vehicle_presets WHERE job_preset = ?', { jobPreset })
+        else
+            countOk, countRow = db('savePreset count', MySQL.single.await,
+                'SELECT COUNT(*) AS n FROM vehicle_presets WHERE owner_identifier = ? AND job_preset IS NULL', { identifier })
+        end
+        if not countOk then return dbFailed(src) end
+        local count = countRow and tonumber(countRow.n) or 0
 
-    local ok, why = Workshop.presetAllowed(kind, count, grade or 0, Config)
-    if not ok then return notify(src, 'Preset', why or 'That preset is not allowed.', 'error') end
+        local allowed, why = Workshop.presetAllowed(kind, count, grade or 0, Config)
+        if not allowed then return notify(src, 'Preset', why or 'That preset is not allowed.', 'error') end
 
-    -- NULLIF keeps job_preset NULL for a personal preset without binding a nil
-    -- in the middle of the parameter list (oxmysql leaves a hole there).
-    MySQL.query.await([[
-        INSERT INTO vehicle_presets (preset_name, vehicle_model, owner_identifier, job_preset, preset_data)
-        VALUES (?, ?, ?, NULLIF(?, ''), ?)
-        ON DUPLICATE KEY UPDATE preset_data = VALUES(preset_data), job_preset = VALUES(job_preset),
-            updated_at = CURRENT_TIMESTAMP
-    ]], { name, model, identifier, jobPreset or '', encoded })
-    notify(src, 'Preset saved', ('"%s" saved for %s.'):format(name, model), 'success')
-    lib.print.info(('%s preset "%s" saved for %s by %s (src %s, %d bytes)'):format(kind, name, model, identifier, src, #encoded))
+        -- NULLIF keeps job_preset NULL for a personal preset without binding a nil
+        -- in the middle of the parameter list (oxmysql leaves a hole there).
+        local ok = db('savePreset', MySQL.query.await, [[
+            INSERT INTO vehicle_presets (preset_name, vehicle_model, owner_identifier, job_preset, preset_data)
+            VALUES (?, ?, ?, NULLIF(?, ''), ?)
+            ON DUPLICATE KEY UPDATE preset_data = VALUES(preset_data), job_preset = VALUES(job_preset),
+                updated_at = CURRENT_TIMESTAMP
+        ]], { name, model, identifier, jobPreset or '', encoded })
+        if not ok then return dbFailed(src) end
+        notify(src, 'Preset saved', ('"%s" saved for %s.'):format(name, model), 'success')
+        lib.print.info(('%s preset "%s" saved for %s by %s (src %s, %d bytes)'):format(kind, name, model, identifier, src, #encoded))
+    end)
 end)
 
 lib.callback.register('dps-fleet:server:presets', function(source, modelName)
@@ -619,12 +709,13 @@ lib.callback.register('dps-fleet:server:presets', function(source, modelName)
     if not identifier then return false end
     local jobName = playerJob(source)
 
-    local rows = MySQL.query.await([[
+    local ok, rows = db('presets', MySQL.query.await, [[
         SELECT preset_name, preset_data, job_preset, owner_identifier
         FROM vehicle_presets
         WHERE LOWER(vehicle_model) = ? AND (owner_identifier = ? OR job_preset = ?)
         ORDER BY job_preset IS NOT NULL DESC, preset_name ASC
     ]], { model, identifier, jobName or '' })
+    if not ok then return false end
 
     local out = {}
     for _, row in ipairs(rows or {}) do
@@ -652,11 +743,12 @@ RegisterNetEvent('vehiclemods:server:deletePreset', function(presetName, modelNa
     if not identifier then return notify(src, 'Preset', 'Your character is not loaded yet.', 'error') end
     local jobName, grade = playerJob(src)
 
-    local row = MySQL.single.await([[
+    local found, row = db('deletePreset lookup', MySQL.single.await, [[
         SELECT id, owner_identifier, job_preset FROM vehicle_presets
         WHERE preset_name = ? AND LOWER(vehicle_model) = ? AND (owner_identifier = ? OR job_preset = ?)
         LIMIT 1
     ]], { presetName, model, identifier, jobName or '' })
+    if not found then return dbFailed(src) end
     if not row then
         return notify(src, 'Preset', ('%s has no preset called "%s".'):format(model, presetName), 'error')
     end
@@ -668,7 +760,8 @@ RegisterNetEvent('vehiclemods:server:deletePreset', function(presetName, modelNa
         return notify(src, 'Preset', ('Only the owner or grade %d and above can delete that preset.'):format(minGrade), 'error')
     end
 
-    MySQL.query.await('DELETE FROM vehicle_presets WHERE id = ?', { row.id })
+    local ok = db('deletePreset', MySQL.query.await, 'DELETE FROM vehicle_presets WHERE id = ?', { row.id })
+    if not ok then return dbFailed(src) end
     notify(src, 'Preset deleted', ('"%s" deleted.'):format(presetName), 'success')
     lib.print.info(('preset "%s" (%s) deleted by %s (src %s)'):format(presetName, model, identifier, src))
 end)
@@ -679,9 +772,9 @@ end)
 
 RegisterNetEvent('vehiclemods:server:saveLiveryMemory', function(modelName, liveryIndex, liveryMod, customLivery, extras)
     local src = source
+    if not canWorkshop(src) then return end
     local cfg = Config.AutoApplyLivery
     if not cfg or not cfg.enabled then return end
-    if not canWorkshop(src) then return end
     local model = validModel(modelName)
     if not model then return end
     local identifier = citizenidOf(src)
@@ -692,7 +785,7 @@ RegisterNetEvent('vehiclemods:server:saveLiveryMemory', function(modelName, live
     if type(customLivery) ~= 'string' or not Workshop.isSafeLiveryFile(customLivery) then customLivery = nil end
     local extrasJson = type(extras) == 'table' and json.encode(extras) or nil
 
-    MySQL.query.await([[
+    local ok = db('saveLiveryMemory', MySQL.query.await, [[
         INSERT INTO player_livery_memory (identifier, vehicle_model, livery_index, livery_mod, custom_livery, extras)
         VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
         ON DUPLICATE KEY UPDATE
@@ -703,24 +796,25 @@ RegisterNetEvent('vehiclemods:server:saveLiveryMemory', function(modelName, live
             updated_at = CURRENT_TIMESTAMP
     ]], { identifier, model, tonumber(liveryIndex) or -1, tonumber(liveryMod) or -1,
           customLivery or '', extrasJson or '' })
+    if not ok then return dbFailed(src) end
     lib.print.info(('livery memory saved for %s on %s (livery %s, mod %s, custom %s)'):format(
         identifier, model, tostring(tonumber(liveryIndex) or -1), tostring(tonumber(liveryMod) or -1), customLivery or 'none'))
 end)
 
 lib.callback.register('dps-fleet:server:liveryMemory', function(source, modelName)
+    if not canWorkshop(source) then return false end
     local cfg = Config.AutoApplyLivery
     if not cfg or not cfg.enabled then return false end
-    if not canWorkshop(source) then return false end
     local model = validModel(modelName)
     if not model then return false end
     local identifier = citizenidOf(source)
     if not identifier then return false end
 
-    local row = MySQL.single.await([[
+    local ok, row = db('liveryMemory', MySQL.single.await, [[
         SELECT livery_index, livery_mod, custom_livery, extras FROM player_livery_memory
         WHERE identifier = ? AND LOWER(vehicle_model) = ?
     ]], { identifier, model })
-    if not row then return false end
+    if not ok or not row then return false end
     return {
         liveryIndex = tonumber(row.livery_index) or -1,
         liveryMod = tonumber(row.livery_mod) or -1,
@@ -828,4 +922,5 @@ end)
 
 AddEventHandler('playerDropped', function()
     fieldRepairCooldowns[source] = nil
+    busy[source] = nil
 end)

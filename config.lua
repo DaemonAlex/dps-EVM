@@ -196,17 +196,8 @@ Config.CustomLiveries = {
         {name = "LSPD Slicktop", file = "liveries/police_livery2.yft"},
         {name = "BCSO Standard", file = "liveries/police_livery3.yft"}
     },
-    -- DPS 2026-09-27: the vendor key 'ambulance' is not a name on this server; the
-    -- medical set is sams (field EMS) / omc (LS hospital) / rmc (Roxwood hospital).
-    ["sams"] = {
-        {name = "EMS Standard", file = "liveries/ambulance_livery1.yft"},
-        {name = "Fire Department", file = "liveries/ambulance_fire.yft"}
-    },
-    ["omc"] = {
-        {name = "EMS Standard", file = "liveries/ambulance_livery1.yft"},
-        {name = "Fire Department", file = "liveries/ambulance_fire.yft"}
-    },
-    ["rmc"] = {
+    -- The keys here are vehicle spawn codes, not job names (controller 2026-09-27).
+    ["ambulance"] = {
         {name = "EMS Standard", file = "liveries/ambulance_livery1.yft"},
         {name = "Fire Department", file = "liveries/ambulance_fire.yft"}
     }
