@@ -17,8 +17,8 @@
     browse: '<kbd>↑↓</kbd> move &nbsp;<kbd>Enter</kbd> spawn &nbsp;<kbd>C</kbd> card &nbsp;<kbd>H</kbd> handling &nbsp;<kbd>F</kbd> fav &nbsp;<kbd>W</kbd> workshop &nbsp;<kbd>X</kbd> remove · type to search',
     ws: '<kbd>↑↓</kbd> move &nbsp;<kbd>Enter</kbd> switch / choose &nbsp;<kbd>←→</kbd> levels &nbsp;<kbd>Esc</kbd> back · type to filter options',
   };
-  const S = { byModel: {}, total: 0, recent: [], favs: new Set(), deptNames: {}, deptCodes: {}, catLabels: {}, chip: 'all', rows: [], sel: -1, open: false, pmode: 'browse', focus: 'type', timer: null, infoTimer: null };
-  const W = { sections: [], sec: null, icon: {}, sheet: null, rows: [], sel: -1, openKey: null, ci: -1, vehicle: null, hex: {}, note: '' };
+  const S = { byModel: {}, total: 0, recent: [], favs: new Set(), deptNames: {}, deptCodes: {}, catLabels: {}, chip: 'all', rows: [], sel: -1, open: false, pmode: 'browse', want: 'browse', focus: 'type', timer: null, infoTimer: null };
+  const W = { sections: [], sec: null, icon: {}, sheet: null, rows: [], sel: -1, openKey: null, ci: -1, vehicle: null, hex: {}, note: '', req: 0 };
 
   const store = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
@@ -143,13 +143,19 @@
     for (const c of (o.choices || [])) { if (same(c.value, o.value)) return c; }
     return null;
   }
+  // The "no colour known" swatch comes from the palette, never from a literal here.
+  let swatchNone = null;
+  function noSwatch() {
+    if (swatchNone === null) swatchNone = (getComputedStyle(document.documentElement).getPropertyValue('--cd-swatch-none') || '').trim() || 'transparent';
+    return swatchNone;
+  }
   function hexOf(c) {
-    if (!c) return '#333a52';
+    if (!c) return noSwatch();
     if (c.hex) return String(c.hex);
     const v = c.value;
-    if (typeof v === 'number') return W.hex[v] || W.hex[String(v)] || '#333a52';
+    if (typeof v === 'number') return W.hex[v] || W.hex[String(v)] || noSwatch();
     if (Array.isArray(v) && v.length === 3) return `rgb(${Number(v[0]) || 0},${Number(v[1]) || 0},${Number(v[2]) || 0})`;
-    return '#333a52';
+    return noSwatch();
   }
   function stepText(o) {
     const v = Number(o.value), max = o.max == null ? null : Number(o.max);
@@ -234,12 +240,13 @@
   function wsApply(o, value) {
     if (!o) return;
     // Actions carry no value at all: the key is left out so Lua reads a plain nil.
-    const body = { section: W.sec, key: o.key };
+    const sec = W.sec, body = { section: sec, key: o.key };
     if (value !== undefined && value !== null) body.value = value;
     post('ws:apply', body).then((r) => {
       if (r.message) toast(esc(r.message), !r.ok);
       else if (!r.ok) toast(esc(r.reason || 'That did not work.'), true);
-      if (r.gone) { setPanelMode('browse'); return; }
+      if (r.gone) { if (S.pmode === 'workshop') setPanelMode('browse'); return; }
+      if (W.sec !== sec) return;                  // the section moved on while we waited
       W.openKey = null; W.ci = -1;
       if (r.sheet) { W.sheet = r.sheet; renderSheet(o.key); }
     });
@@ -255,8 +262,11 @@
     });
   }
   function enterWorkshop(model) {
+    const token = ++W.req;
     post('ws:open', { model: model || null }).then((r) => {
-      if (!r.ok) { toast(esc(r.reason || 'The workshop is not available here.'), true); markMode(S.pmode); return; }
+      // Back in Browse, or a newer open already asked: drop this answer on the floor.
+      if (S.want !== 'workshop' || token !== W.req) return;
+      if (!r.ok) { toast(esc(r.reason || 'The workshop is not available here.'), true); S.want = S.pmode; markMode(S.pmode); return; }
       S.pmode = 'workshop';
       W.vehicle = r.vehicle || null; W.sections = r.sections || []; W.hex = r.colourHex || {};
       W.icon = {}; W.sections.forEach((s) => { W.icon[s.id] = s.icon || 'fa-sliders'; });
@@ -272,6 +282,7 @@
   }
   function markMode(m) { document.querySelectorAll('.mode').forEach((b) => b.classList.toggle('on', b.dataset.m === m)); }
   function setPanelMode(m, model) {
+    S.want = m === 'workshop' ? 'workshop' : 'browse';
     if (m === 'workshop') { enterWorkshop(model); return; }
     S.pmode = 'browse'; markMode('browse');
     W.sheet = null; W.rows = []; W.sel = -1; W.openKey = null; W.ci = -1;
@@ -475,8 +486,8 @@
       S.total = m.total || 0; S.recent = m.recent || []; S.favs = new Set(m.favorites || []);
       S.deptNames = m.deptNames || {}; S.deptCodes = m.deptCodes || {}; S.catLabels = m.categoryLabels || {};
       S.chip = 'all'; chips.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x.dataset.f === 'all'));
-      S.pmode = 'browse'; markMode('browse');
-      W.sheet = null; W.rows = []; W.sel = -1; W.openKey = null; W.ci = -1; W.sec = null;
+      S.pmode = 'browse'; S.want = 'browse'; markMode('browse');
+      W.sheet = null; W.rows = []; W.sel = -1; W.openKey = null; W.ci = -1; W.sec = null; W.req++;
       ws.hidden = true; chips.hidden = false; list.hidden = false;
       q.value = ''; q.placeholder = PLACE.browse; $('#clr').hidden = true;
       applyGeo(); app.hidden = false; setFocus('type'); refresh(false);

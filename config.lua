@@ -42,6 +42,7 @@ Config.EnabledModifications = {
     Doors = true,               -- Door controls
     Repair = true,              -- Vehicle repair functionality
     Sirens = true,  -- DPS: per-model siren tones for LVC
+    Presets = true,  -- DPS: presets section
 }
 
 -- Selective neon for undercover/unmarked vehicles
