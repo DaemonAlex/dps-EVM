@@ -54,9 +54,25 @@ one config, one ace, and one panel. Both resources are benched (not deleted).
 - The trunk-gear logout hook now clears worn gear on the native Qbox event
   (`qbx_core:client:playerLoggedOut`) instead of a QBCore-only event that
   never fires under Qbox.
-- Verified the panel paints no full-screen background: only the search bar
-  and the panel itself carry the translucent navy shell (over blur); the rest
-  of the screen is untouched.
+- Panel height now follows its content up to the drag height instead of a
+  fixed 62% of the screen, and every layer is translucent over the game (bar
+  `.72`, panel `.62`, headers `.82`, strips `.35`).
+- `chargeRepair` callback now accepts only `full`/`emergency`; field repair
+  reaches it through its own kit-and-cooldown gate instead of a bare charge
+  call.
+- `saveModifications`, `saveLiveryMemory`, and `applyCustomLivery` each run
+  under a per-player-per-handler lock, and custom-livery broadcasts carry a
+  1 s cooldown.
+- Workshop keys are spawn codes resolved from the model hash; the vehicles.meta
+  game name is used only for sirens and livery labels, not as a lookup key.
+- Livery memory now only queries emergency models and re-reads the driver
+  seat before applying.
+- Gear that hands the player an item (`medbag`) always requires that item to
+  already be in the trunk, matching the rest of the gear catalogue.
+- Logout clears the panel's client-side state.
+- The field-repair cooldown is keyed on `citizenid`, not the source id.
+- `RepairCosts.discountJobs`' discount defaults to `0` for an unlisted job
+  instead of falling through unchecked.
 
 ## [2.4.0] - 2026-08-28 - **DPS Job Audit, /evm, On-Foot Fix & Repair Economy**
 

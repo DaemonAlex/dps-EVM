@@ -34,7 +34,8 @@ see [Upgrading from dps-EVM / dps-carmenu](#upgrading-from-dps-evm--dps-carmenu)
   by **department** (Los Santos Police Department, BCSO, SAHP, FIB, DOC, Fish
   & Wildlife, Coast Guard, Roxwood PD/SO, LSFD, RFD, SAMS, OMC, RMC) and then
   by **kind** (Cruiser, Unmarked, SUV / truck, Fire engine, Ladder truck,
-  Ambulance, Helicopter, …).
+  Ambulance, Helicopter, …). LSPD SWAT (`police_swat`) has its own row inside
+  the Los Santos Police Department department.
 - **Photos** — when [jg-vehiclestudio](#requirements) is installed, Browse
   shows its default vehicle photo for every model it has one for. No
   jg-vehiclestudio, no photos — everything else still works.
@@ -157,12 +158,13 @@ Every `Config.*` key lives in `config.lua`, grouped the same way the file is.
 | `AutoAces` | `true` | Grant the `dps.fleet` ace to `group.admin` and `group.tester` at start if either is missing it |
 | `JobMappings` | `{ police = {...}, fire = {...}, ambulance = {...}, mechanic = {...} }` | **Only read when `AutoJobs = false`.** Manual group → job-names map; group keys, not job names |
 | `EnableGradeRestrictions`, `DisableZoneRestrictions`, `ManualJobSystem` | `false`, `true`, `true` | Carried over from dps-EVM; not read anywhere in the current code — reserved |
+| `JobDefaults` | `enabled = true`, plus a `police`/`fire`/`ambulance` sub-table each with `defaultColors`, `suggestedNeonColor`, `priorityExtras`, `showNeon` | Carried over from dps-EVM; not read anywhere on this branch — reserved |
 
 ### Feature toggles
 
 | Key | Default | Meaning |
 |---|---|---|
-| `EnabledModifications.*` | all `true` except `Neon` | One flag per Workshop section (`Liveries`, `CustomLiveries`, `Performance`, `Appearance` [colours/wheels/tint], `Neon`, `Extras`, `Doors`, `Repair`, `Sirens`, `Presets`) — `false` removes that section from the menu |
+| `EnabledModifications.*` | all `true` except `Neon` | 10 flags gate the Workshop's 14 sections (`Liveries`, `CustomLiveries`, `Performance`, `Appearance` covers Colours/Wheels/Window tint, `Neon`, `Extras`, `Doors` covers Doors/Windows/Seats, `Repair`, `Sirens`, `Presets`) — `false` removes that section (or that whole trio, for `Appearance`/`Doors`) from the menu |
 | `UndercoverNeon.enabled` | `false` | `true` lets neon show on specific vehicles even while `EnabledModifications.Neon` is off |
 | `UndercoverNeon.allowedVehicles` | `{}` | Spawn codes allowed neon under the rule above |
 
@@ -172,6 +174,7 @@ Every `Config.*` key lives in `config.lua`, grouped the same way the file is.
 |---|---|---|
 | `RepairCosts.enabled` | `true` | `false` makes every repair free |
 | `RepairCosts.chargeFrom` | `'bank'` | `'bank'`, `'cash'`, or `'both'` (bank first) |
+| `RepairCosts.currency` | `'money'` | Unused/reserved — `chargeFrom` is what the code actually reads |
 | `RepairCosts.fullRepairCost` / `emergencyRepairCost` / `fieldRepairCost` | `500` / `200` / `350` | Base price per repair kind, charged server-side (client-supplied cost is never trusted) |
 | `RepairCosts.freeForJobs` | `{ 'mechanic' }` | Jobs that repair for free |
 | `RepairCosts.discountJobs` | every LEO/fire/medical job at `0.25` | Per-job discount list |
@@ -199,6 +202,7 @@ Every `Config.*` key lives in `config.lua`, grouped the same way the file is.
 | `Presets.allowJobPresets` | `true` | Lets a high-enough grade save a job-wide preset |
 | `Presets.minGradeForJobPresets` | `3` | Grade needed to save (or delete another player's) job preset |
 | `Presets.saveToDatabase` | `true` | Presets persist in `vehicle_presets` |
+| `Presets.maxPresetBytes` | *(not in `config.lua`)* | Optional — `server.lua` reads it and falls back to `16384` bytes when it's absent, so a preset's saved size is capped either way |
 
 ### Auto-apply livery (livery memory)
 
