@@ -123,6 +123,8 @@ local function cardInfo(model)
     for k, v in pairs(row) do out[k] = v end
     for k, v in pairs(readModelInfo(model)) do out[k] = v end
     out.handling = readHandling(model)
+    local veh = liveVehicle(model)
+    if veh then out.workshop = WorkshopClient.summary(veh) end
     return out
 end
 

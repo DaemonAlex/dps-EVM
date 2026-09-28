@@ -301,6 +301,35 @@ function WorkshopClient.props(veh)
     }
 end
 
+---Plain-fact summary of a live vehicle's current workshop state, for the Copy
+---card (shared/search.lua Card.format). Built from WorkshopClient.props(veh)
+---plus the vocabulary tables in shared/workshop.lua; nil when there is no
+---live vehicle to read.
+---@param veh number
+---@return table|nil { livery = name|nil, extras = {ids on...}, primary, secondary, wheels, tint }
+function WorkshopClient.summary(veh)
+    local props = WorkshopClient.props(veh)
+    if not props then return nil end
+
+    local extras = {}
+    for id, on in pairs(props.extras or {}) do
+        if on then extras[#extras + 1] = id end
+    end
+    table.sort(extras)
+
+    local livery = nil
+    if props.livery and props.livery > -1 then livery = GetEnhancedLiveryName(veh, props.livery) end
+
+    return {
+        livery = livery,
+        extras = extras,
+        primary = Workshop.COLOURS[props.color1],
+        secondary = Workshop.COLOURS[props.color2],
+        wheels = Workshop.WHEEL_TYPES[props.wheels],
+        tint = Workshop.TINTS[props.windowTint],
+    }
+end
+
 ---Legacy ApplyVehicleProperties (2286-2362), verbatim behaviour.
 ---@param veh number
 ---@param props table

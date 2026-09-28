@@ -41,3 +41,8 @@ check('int field', block:find('<nInitialDriveGears value="6" />', 1, true))
 check('vector field', block:find('<vecCentreOfMassOffset x="0.000000" y="0.100000" z="-0.200000" />', 1, true))
 check('missing float shown as -', block:find('<fBrakeForce value="-" />', 1, true))
 eq('field count sanity', #HandlingFields.floats, 42)
+
+-- workshop facts on the card (Task 9)
+local c = Card.format({ model = 'gbpolstanier', name = 'Stanier LE Police', category = 'emergency', workshop = { livery = 'Slicktop', extras = { 1, 3 }, primary = 'Metallic Black', secondary = 'Metallic Black', wheels = 'Sport', tint = 'Dark smoke' } })
+check('workshop line', c:find('workshop: livery Slicktop · extras 1, 3 · colours Metallic Black / Metallic Black · wheels Sport · tint Dark smoke', 1, true))
+check('workshop line omitted when absent', not Card.format({ model = 'x', name = 'Solo' }):find('workshop:', 1, true))

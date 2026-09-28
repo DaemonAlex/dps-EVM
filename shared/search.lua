@@ -175,6 +175,22 @@ function Card.format(info)
     else
         lines[#lines + 1] = 'handling: (spawn it or sit in it, then Copy card again for the handling line)'
     end
+    local w = info.workshop
+    if w then
+        local extras = 'none'
+        if w.extras and #w.extras > 0 then
+            local ids = {}
+            for i, id in ipairs(w.extras) do ids[i] = tostring(id) end
+            extras = table.concat(ids, ', ')
+        end
+        local parts = {}
+        if w.livery then parts[#parts + 1] = 'livery ' .. w.livery end
+        parts[#parts + 1] = 'extras ' .. extras
+        parts[#parts + 1] = ('colours %s / %s'):format(w.primary or '-', w.secondary or '-')
+        parts[#parts + 1] = 'wheels ' .. (w.wheels or '-')
+        parts[#parts + 1] = 'tint ' .. (w.tint or '-')
+        lines[#lines + 1] = 'workshop: ' .. table.concat(parts, ' · ')
+    end
     lines[#lines + 1] = 'notes: DPS class envelope ±5% per category; race cars never on stock sound or tune; LVC only'
     return table.concat(lines, '\n')
 end
