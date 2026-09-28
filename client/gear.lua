@@ -411,6 +411,6 @@ end)
 
 -- Job and worn gear are per-character: a logout leaves nothing behind (the ped is
 -- rebuilt on the next spawn, so only our memory needs clearing).
-RegisterNetEvent('QBCore:Client:OnPlayerUnload', function()
+RegisterNetEvent('qbx_core:client:playerLoggedOut', function()
     worn = {}
 end)
