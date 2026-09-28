@@ -48,12 +48,19 @@ end)
 -- passenger did not choose this vehicle. applyOnEnter/applyOnSpawn are honoured
 -- the way the legacy thread did (either flag gates the same entry check).
 
+-- Only department vehicles have livery memory, so only they are worth a database
+-- read: the department map (client/gear.lua) answers that from one table lookup,
+-- and it answers with the spawn code, which is the key the row is stored under.
+-- cache.seat is not read here: ox_lib may not have refreshed it yet when the
+-- vehicle change fires, so the seat is read off the vehicle itself.
 lib.onCache('vehicle', function(veh)
     if not veh or not Config.AutoApplyLivery or not Config.AutoApplyLivery.enabled then return end
     if not (Config.AutoApplyLivery.applyOnEnter or Config.AutoApplyLivery.applyOnSpawn) then return end
-    if cache.seat ~= -1 then return end
+    if GetPedInVehicleSeat(veh, -1) ~= cache.ped then return end
 
-    local model = GetDisplayNameFromVehicleModel(GetEntityModel(veh)):lower()
+    local model = GearClient and GearClient.emergencyModel and GearClient.emergencyModel(GetEntityModel(veh))
+    if not model then return end
+
     local mem = lib.callback.await('dps-fleet:server:liveryMemory', false, model)
     if not mem then return end
     WorkshopClient.applyMemory(veh, mem)

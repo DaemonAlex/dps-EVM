@@ -32,6 +32,7 @@
 local FEMALE_PED = joaat('mp_f_freemode_01')
 
 local GEAR_BY_HASH = {}   -- model hash (unsigned) -> { model, dept, gear, set }
+local EMERGENCY_BY_HASH = {} -- model hash (unsigned) -> spawn code, every model in data/emergency.json
 local JOB_SET = {}        -- job name -> true, the workshop set as the server derived it
 local JOB_LIST = {}       -- the same names as an array, for ox_target's groups filter
 local worn = {}           -- slot name -> { key, original = { drawable, texture } | nil, applied = armour actually added }
@@ -371,6 +372,13 @@ local function useIndex(emergency, jobs)
         end
     end
 
+    -- The whole department map by hash, not just the models that carry a kit:
+    -- client/target.lua asks it whether a vehicle is an emergency one at all.
+    EMERGENCY_BY_HASH = {}
+    for model in pairs(emergency) do
+        if type(model) == 'string' and model ~= '' then EMERGENCY_BY_HASH[joaat(model) % 0x100000000] = model end
+    end
+
     GEAR_BY_HASH = {}
     local n = 0
     for model, entry in pairs(Gear.buildIndex(Config, emergency)) do
@@ -388,6 +396,16 @@ end
 function GearClient.setEmergency(emergency)
     if haveIndex then return end
     useIndex(emergency, nil)
+end
+
+---Is this model a department vehicle? The spawn code comes back so a caller that
+---needs the key has it. Nothing here is a native call: it is one table lookup, so
+---an event handler on every vehicle entry can ask it.
+---@param hash number|nil model hash as GetEntityModel returns it
+---@return string|nil model the spawn code, nil when the model is not a department one
+function GearClient.emergencyModel(hash)
+    if type(hash) ~= 'number' then return nil end
+    return EMERGENCY_BY_HASH[hash % 0x100000000]
 end
 
 ---One shot at resource start, never a loop: the department map and the workshop job

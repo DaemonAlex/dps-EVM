@@ -178,3 +178,12 @@ check('the rest of the kit stays', gi.hvfiretruk.set.firehelmet == true)
 eq('vest slot', Gear.SLOTS.vest.index, 9)
 eq('torso slot', Gear.SLOTS.torso.index, 11)
 eq('head slot is a prop', Gear.SLOTS.head.kind, 'prop')
+
+-- Final review F4: the canonical model key is the spawn code; the lowercased game
+-- name is the fallback for a model the qbx_core registry does not know.
+eq('spawn code wins', Workshop.modelKey('hvfiretruk', 'FIRETRUK'), 'hvfiretruk')
+eq('spawn code is lowercased', Workshop.modelKey('HVFireTruk', 'FIRETRUK'), 'hvfiretruk')
+eq('game name is the fallback', Workshop.modelKey(nil, 'FIRETRUK'), 'firetruk')
+eq('empty spawn code falls back too', Workshop.modelKey('', 'POLICE'), 'police')
+eq('no key at all', Workshop.modelKey(nil, nil), '')
+eq('CARNOTFOUND is not a key', Workshop.modelKey(nil, 'CARNOTFOUND'), '')

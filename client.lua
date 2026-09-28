@@ -13,7 +13,8 @@ local isOpen = false
 local startMode = 'browse'
 local ALL = {}            -- rows: model, name, brand, category, type, price, pack, cls, make, dept, kind, photo, speed, seats
 local BY_MODEL = {}
-local BY_HASH = {}        -- model hash -> model name, so a live vehicle names itself
+local BY_HASH = {}        -- unsigned model hash -> spawn code, so a live vehicle names itself
+local hashIndexed = false -- BY_HASH holds the whole registry, not just an open panel's rows
 local wsVehicle = nil     -- the vehicle the workshop is working on, re-resolved on every call
 local wsModel = nil       -- its model name, kept so the last-spawned fallback still works
 local INFO = {}           -- model -> model-native info, read once per session
@@ -132,6 +133,7 @@ end
 
 local function buildRows(data)
     ALL, BY_MODEL, BY_HASH = {}, {}, {}
+    hashIndexed = false
     local packs, classes, emergency, photos = data.packs or {}, data.classes or {}, data.emergency or {}, data.photos or {}
     local registry = exports.qbx_core:GetVehiclesByName()
     if type(registry) ~= 'table' then return end
@@ -148,8 +150,29 @@ local function buildRows(data)
         end
         ALL[#ALL + 1] = row
         BY_MODEL[model] = row
-        BY_HASH[joaat(model)] = model
+        BY_HASH[joaat(model) % 0x100000000] = model
     end
+    hashIndexed = true
+end
+
+---The spawn code of a live vehicle's model, which is the key every model-keyed
+---table in this resource uses (client/workshop.lua modelOf, the emergency index,
+---custom liveries, presets, livery memory). Hashes are normalised to unsigned
+---32-bit because joaat and GetEntityModel disagree on sign above 2^31.
+---BY_HASH is filled by buildRows on the first panel open; before that (a livery
+---memory restore on vehicle entry) the registry is read once, here.
+---@param hash number|nil
+---@return string|nil spawnCode
+local function spawnCodeOf(hash)
+    if type(hash) ~= 'number' then return nil end
+    local key = hash % 0x100000000
+    local model = BY_HASH[key]
+    if model or hashIndexed then return model end
+    local registry = exports.qbx_core:GetVehiclesByName()
+    if type(registry) ~= 'table' then return nil end
+    for name in pairs(registry) do BY_HASH[joaat(name) % 0x100000000] = name end
+    hashIndexed = true
+    return BY_HASH[key]
 end
 
 -- ── open / close ───────────────────────────────────────────────────────────────
@@ -204,6 +227,8 @@ end
 FleetPanel = FleetPanel or {}
 FleetPanel.open = openPanel
 FleetPanel.close = closePanel
+-- client/workshop.lua and client/target.lua key their tables on the spawn code.
+FleetPanel.spawnCodeOf = spawnCodeOf
 
 local function toggle(mode)
     if isOpen then closePanel() else openPanel(mode) end
@@ -359,7 +384,7 @@ RegisterNUICallback('ws:open', function(req, cb)
     if type(req) == 'table' and type(req.model) == 'string' and #req.model <= 40 then model = req.model end
     local veh = wsResolve(model)
     if not veh then cb({ ok = false, reason = 'Sit in a vehicle or target one.' }) return end
-    wsModel = BY_HASH[GetEntityModel(veh)]
+    wsModel = spawnCodeOf(GetEntityModel(veh))
 
     local ok, why = lib.callback.await('dps-fleet:server:workshopAccess', false)
     if not ok then
@@ -413,6 +438,15 @@ RegisterNUICallback('ws:apply', function(req, cb)
     if isOpen then SetNuiFocus(true, true) end
     local sheet = DoesEntityExist(veh) and WorkshopClient.sheet(veh, section) or nil
     cb({ ok = ok, message = message, sheet = sheet })
+end)
+
+-- A logout must leave nothing of the last character behind: the panel closes (so
+-- NUI focus is not held over the character screen) and every vehicle this file
+-- remembers is dropped.
+RegisterNetEvent('qbx_core:client:playerLoggedOut', function()
+    closePanel()
+    if WorkshopClient and WorkshopClient.clearVehicle then WorkshopClient.clearVehicle() end
+    wsVehicle, wsModel, lastSpawned = nil, nil, nil
 end)
 
 AddEventHandler('onResourceStop', function(res)

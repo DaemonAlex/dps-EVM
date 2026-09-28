@@ -438,6 +438,22 @@ Workshop.COLOUR_HEX = {
     [160] = '#17a333',
 }
 
+---The canonical key every model-keyed table in this resource uses: the SPAWN CODE
+---(Config.CustomLiveries, data/emergency.json, custom_liveries, vehicle_mods,
+---vehicle_presets and player_livery_memory are all keyed on it). The spawn code
+---comes from the qbx_core registry; a model the registry does not know has no
+---spawn code, so the game name GTA reports is the only key left. Lowercase both
+---ways: the server stores and matches lowercase. Siren keys are the one exception
+---and keep the game name with its case (Workshop.sirenKey) — LVC reads game names.
+---@param spawnCode string|nil what the registry answered for this model hash
+---@param gameName string|nil GetDisplayNameFromVehicleModel for the same model
+---@return string key '' when neither is usable
+function Workshop.modelKey(spawnCode, gameName)
+    if type(spawnCode) == 'string' and spawnCode ~= '' then return spawnCode:lower() end
+    if type(gameName) ~= 'string' or gameName == '' or gameName == 'CARNOTFOUND' then return '' end
+    return gameName:lower()
+end
+
 -- kind -> the Config.RepairCosts base-cost field it uses.
 local REPAIR_BASE_KEY = { full = 'fullRepairCost', emergency = 'emergencyRepairCost', field = 'fieldRepairCost' }
 
@@ -456,7 +472,7 @@ function Workshop.repairPrice(kind, jobName, cfg)
     local base = rc[REPAIR_BASE_KEY[kind]] or 0
     local discount = 0
     for _, entry in ipairs(rc.discountJobs or {}) do
-        if entry.job == jobName then discount = entry.discount; break end
+        if entry.job == jobName then discount = entry.discount or 0; break end
     end
     return math.floor(base * (1 - discount) + 0.5)
 end

@@ -60,10 +60,17 @@ local NEON_COLOURS = {
 
 -- ── small helpers ──────────────────────────────────────────────────────────────
 
+---The key every model-keyed table here uses: the SPAWN CODE, which is what
+---Config.CustomLiveries, data/emergency.json, the gear index and the database
+---columns are keyed on. The registry (client.lua) resolves it from the entity's
+---model hash; the game name is only the fallback for a model the registry does
+---not know. Siren keys are the exception and stay on the game name (gameNameOf).
+---@param veh number
+---@return string model '' when the vehicle names itself nothing
 local function modelOf(veh)
-    local name = GetDisplayNameFromVehicleModel(GetEntityModel(veh))
-    if not name or name == '' then return '' end
-    return name:lower()
+    local hash = GetEntityModel(veh)
+    local spawnCode = FleetPanel and FleetPanel.spawnCodeOf and FleetPanel.spawnCodeOf(hash) or nil
+    return Workshop.modelKey(spawnCode, GetDisplayNameFromVehicleModel(hash))
 end
 
 ---Server halves of the workshop (custom liveries, presets, repair quotes) land in

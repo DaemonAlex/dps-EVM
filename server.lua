@@ -210,11 +210,21 @@ local REPAIR_KINDS = { full = true, emergency = true, field = true }
 -- with every add/remove so the callback answers without touching the database.
 local CUSTOM_LIVERIES = {}
 
--- src -> os.time() of the last completed field repair. Plain table, no timers.
+-- citizenid -> os.time() of the last completed field repair. Keyed on the character,
+-- not the src, so a reconnect does not hand out a fresh cooldown. Plain table, no
+-- timers: one five-minute entry per character costs nothing.
 local fieldRepairCooldowns = {}
 
--- src -> true while a check-then-write is in flight. Two fast clicks would
--- otherwise both pass the limit/duplicate check before either row lands.
+-- src -> GetGameTimer() of the last custom-livery broadcast. That event goes to
+-- every client and each one may spend up to three seconds waiting for the texture
+-- dictionary, so one broadcast per second per player is the ceiling.
+local liveryBroadcasts = {}
+
+-- src -> { [handler name] = true } while that handler's check-then-write is in
+-- flight. Two fast clicks on the same thing would otherwise both pass the
+-- limit/duplicate check before either row lands. Per handler, not per player: one
+-- livery apply writes livery memory and the vehicle setup in the same breath, and
+-- those two must not lock each other out.
 local busy = {}
 
 ---@param src number
@@ -250,18 +260,23 @@ local function dbFailed(src)
     })
 end
 
----Runs a check-then-write section under the per-player lock, so the lock is
----released whether the body returns, refuses or throws.
+---Runs a check-then-write section under this player's lock for this handler, so
+---the lock is released whether the body returns, refuses or throws.
 ---@param src number
----@param what string handler name for the log line
+---@param what string handler name, also the lock key and the log line
 ---@param body function
 local function underLock(src, what, body)
-    if busy[src] then
+    local locks = busy[src]
+    if not locks then
+        locks = {}
+        busy[src] = locks
+    end
+    if locks[what] then
         return notify(src, 'Workshop', 'Hold on — the last change is still saving.', 'error')
     end
-    busy[src] = true
+    locks[what] = true
     local ran, err = pcall(body)
-    busy[src] = nil
+    locks[what] = nil
     if not ran then
         lib.print.warn(('%s: failed — %s'):format(what, tostring(err)))
         dbFailed(src)
@@ -668,21 +683,30 @@ end)
 
 RegisterNetEvent('vehiclemods:server:applyCustomLivery', function(netId, modelName, liveryFile)
     local src = source
-    if not canWorkshop(src) then return notify(src, 'Access denied', 'You may not modify vehicles.', 'error') end
-    local model = validModel(modelName)
-    if not model then return notify(src, 'Custom livery', 'That vehicle model is not valid.', 'error') end
-    local veh = resolveCallerVehicle(src, netId)
-    if not veh then
-        return notify(src, 'Custom livery', 'That vehicle is not in reach.', 'error')
-    end
-    if not vehicleIsModel(veh, model) then
-        return notify(src, 'Custom livery', 'That livery belongs to a different vehicle.', 'error')
-    end
-    if not Workshop.isSafeLiveryFile(liveryFile) then
-        return notify(src, 'Custom livery', 'That livery file is not allowed.', 'error')
-    end
-    TriggerClientEvent('vehiclemods:client:setCustomLivery', -1, netId, modelName, liveryFile)
-    lib.print.info(('custom livery %s applied to %s (netId %s) by src %s'):format(liveryFile, model, netId, src))
+    underLock(src, 'applyCustomLivery', function()
+        if not canWorkshop(src) then return notify(src, 'Access denied', 'You may not modify vehicles.', 'error') end
+        local model = validModel(modelName)
+        if not model then return notify(src, 'Custom livery', 'That vehicle model is not valid.', 'error') end
+        local veh = resolveCallerVehicle(src, netId)
+        if not veh then
+            return notify(src, 'Custom livery', 'That vehicle is not in reach.', 'error')
+        end
+        if not vehicleIsModel(veh, model) then
+            return notify(src, 'Custom livery', 'That livery belongs to a different vehicle.', 'error')
+        end
+        if not Workshop.isSafeLiveryFile(liveryFile) then
+            return notify(src, 'Custom livery', 'That livery file is not allowed.', 'error')
+        end
+        -- The broadcast makes every client load a texture dictionary; one a second.
+        local now = GetGameTimer()
+        local last = liveryBroadcasts[src]
+        if last and (now - last) < 1000 then
+            return notify(src, 'Custom livery', 'One livery change a second, please.', 'error')
+        end
+        liveryBroadcasts[src] = now
+        TriggerClientEvent('vehiclemods:client:setCustomLivery', -1, netId, modelName, liveryFile)
+        lib.print.info(('custom livery %s applied to %s (netId %s) by src %s'):format(liveryFile, model, netId, src))
+    end)
 end)
 
 RegisterNetEvent('vehiclemods:server:clearCustomLivery', function(netId)
@@ -782,21 +806,23 @@ end)
 
 RegisterNetEvent('vehiclemods:server:saveModifications', function(modelName, props)
     local src = source
-    if not canWorkshop(src) then return end
-    local model = validModel(modelName)
-    if not model then return end
-    if type(props) ~= 'table' then return end
-    local encoded = json.encode(props)
-    if type(encoded) ~= 'string' or #encoded > MAX_PROPS_BYTES then
-        return notify(src, 'Vehicle setup', 'That setup is too large to save.', 'error')
-    end
+    underLock(src, 'saveModifications', function()
+        if not canWorkshop(src) then return end
+        local model = validModel(modelName)
+        if not model then return end
+        if type(props) ~= 'table' then return end
+        local encoded = json.encode(props)
+        if type(encoded) ~= 'string' or #encoded > MAX_PROPS_BYTES then
+            return notify(src, 'Vehicle setup', 'That setup is too large to save.', 'error')
+        end
 
-    local ok = db('saveModifications', MySQL.query.await, [[
-        INSERT INTO vehicle_mods (vehicle_model, extras, player_id) VALUES (?, ?, ?)
-        ON DUPLICATE KEY UPDATE extras = VALUES(extras), player_id = VALUES(player_id)
-    ]], { model, encoded, tostring(citizenidOf(src) or src) })
-    if not ok then return dbFailed(src) end
-    lib.print.info(('vehicle_mods saved for %s by src %s (%d bytes)'):format(model, src, #encoded))
+        local ok = db('saveModifications', MySQL.query.await, [[
+            INSERT INTO vehicle_mods (vehicle_model, extras, player_id) VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE extras = VALUES(extras), player_id = VALUES(player_id)
+        ]], { model, encoded, tostring(citizenidOf(src) or src) })
+        if not ok then return dbFailed(src) end
+        lib.print.info(('vehicle_mods saved for %s by src %s (%d bytes)'):format(model, src, #encoded))
+    end)
 end)
 
 lib.callback.register('dps-fleet:server:vehicleConfig', function(source, modelName)
@@ -940,33 +966,35 @@ end)
 
 RegisterNetEvent('vehiclemods:server:saveLiveryMemory', function(modelName, liveryIndex, liveryMod, customLivery, extras)
     local src = source
-    if not canWorkshop(src) then return end
-    local cfg = Config.AutoApplyLivery
-    if not cfg or not cfg.enabled then return end
-    local model = validModel(modelName)
-    if not model then return end
-    local identifier = citizenidOf(src)
-    if not identifier then return end
+    underLock(src, 'saveLiveryMemory', function()
+        if not canWorkshop(src) then return end
+        local cfg = Config.AutoApplyLivery
+        if not cfg or not cfg.enabled then return end
+        local model = validModel(modelName)
+        if not model then return end
+        local identifier = citizenidOf(src)
+        if not identifier then return end
 
-    -- the client sends the whole ActiveCustomLiveries entry here; keep the file only
-    if type(customLivery) == 'table' then customLivery = customLivery.file end
-    if type(customLivery) ~= 'string' or not Workshop.isSafeLiveryFile(customLivery) then customLivery = nil end
-    local extrasJson = type(extras) == 'table' and json.encode(extras) or nil
+        -- the client sends the whole ActiveCustomLiveries entry here; keep the file only
+        if type(customLivery) == 'table' then customLivery = customLivery.file end
+        if type(customLivery) ~= 'string' or not Workshop.isSafeLiveryFile(customLivery) then customLivery = nil end
+        local extrasJson = type(extras) == 'table' and json.encode(extras) or nil
 
-    local ok = db('saveLiveryMemory', MySQL.query.await, [[
-        INSERT INTO player_livery_memory (identifier, vehicle_model, livery_index, livery_mod, custom_livery, extras)
-        VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
-        ON DUPLICATE KEY UPDATE
-            livery_index = VALUES(livery_index),
-            livery_mod = VALUES(livery_mod),
-            custom_livery = VALUES(custom_livery),
-            extras = VALUES(extras),
-            updated_at = CURRENT_TIMESTAMP
-    ]], { identifier, model, tonumber(liveryIndex) or -1, tonumber(liveryMod) or -1,
-          customLivery or '', extrasJson or '' })
-    if not ok then return dbFailed(src) end
-    lib.print.info(('livery memory saved for %s on %s (livery %s, mod %s, custom %s)'):format(
-        identifier, model, tostring(tonumber(liveryIndex) or -1), tostring(tonumber(liveryMod) or -1), customLivery or 'none'))
+        local ok = db('saveLiveryMemory', MySQL.query.await, [[
+            INSERT INTO player_livery_memory (identifier, vehicle_model, livery_index, livery_mod, custom_livery, extras)
+            VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
+            ON DUPLICATE KEY UPDATE
+                livery_index = VALUES(livery_index),
+                livery_mod = VALUES(livery_mod),
+                custom_livery = VALUES(custom_livery),
+                extras = VALUES(extras),
+                updated_at = CURRENT_TIMESTAMP
+        ]], { identifier, model, tonumber(liveryIndex) or -1, tonumber(liveryMod) or -1,
+              customLivery or '', extrasJson or '' })
+        if not ok then return dbFailed(src) end
+        lib.print.info(('livery memory saved for %s on %s (livery %s, mod %s, custom %s)'):format(
+            identifier, model, tostring(tonumber(liveryIndex) or -1), tostring(tonumber(liveryMod) or -1), customLivery or 'none'))
+    end)
 end)
 
 lib.callback.register('dps-fleet:server:liveryMemory', function(source, modelName)
@@ -1036,8 +1064,13 @@ local function chargeRepair(src, kind)
     return true
 end
 
+-- The panel's repair button, and only the workshop repairs it pays for. 'field' is
+-- refused here: a field repair has a gate in front of it (repair kit, cooldown,
+-- allowed job, minimum grade) and the fieldRepair callback below is the only way
+-- through it — it calls chargeRepair('field') itself once the gate has passed.
 lib.callback.register('dps-fleet:server:chargeRepair', function(source, kind)
     if not canWorkshop(source) then return false, 'You may not repair vehicles here.' end
+    if kind ~= 'full' and kind ~= 'emergency' then return false, 'That repair type does not exist.' end
     return chargeRepair(source, kind)
 end)
 
@@ -1047,9 +1080,13 @@ lib.callback.register('dps-fleet:server:fieldRepair', function(source)
     local cfg = Config.FieldRepair
     if not cfg or not cfg.enabled then return false, 'Field repair is switched off.' end
 
+    -- The cooldown belongs to the character, so a reconnect does not clear it.
+    local identifier = citizenidOf(src)
+    if not identifier then return false, 'Your character is not loaded yet.' end
+
     local now = os.time()
     local cooldown = math.floor((tonumber(cfg.cooldown) or 0) / 1000)
-    local last = fieldRepairCooldowns[src]
+    local last = fieldRepairCooldowns[identifier]
     if last and (now - last) < cooldown then
         return false, ('Field repair is on cooldown for another %d seconds.'):format(cooldown - (now - last))
     end
@@ -1082,15 +1119,17 @@ lib.callback.register('dps-fleet:server:fieldRepair', function(source)
     if not paid then return false, why or 'The payment did not go through.' end
 
     if item and cfg.consumeItem then exports.ox_inventory:RemoveItem(src, item, 1) end
-    fieldRepairCooldowns[src] = now
+    fieldRepairCooldowns[identifier] = now
     lib.print.info(('field repair approved for src %s (job %s, grade %s, kit %s)'):format(
         src, jobName or 'none', tostring(grade or 0), item or 'none'))
     return true
 end)
 
+-- fieldRepairCooldowns is keyed on the citizenid and is not cleared here: that is
+-- the point of it, and a five-minute entry per character is nothing.
 AddEventHandler('playerDropped', function()
-    fieldRepairCooldowns[source] = nil
     busy[source] = nil
+    liveryBroadcasts[source] = nil
 end)
 
 -----------------------------------------------------------------------
@@ -1194,12 +1233,14 @@ local function gearItem(def)
     return type(def.item) == 'string' and def.item ~= '' and def.item or nil
 end
 
----Whether that item has to be in this trunk first (Config.TrunkGear.RequireItems).
----With RequireItems off, `give` gear is still handed over — it just is not taken
----out of the trunk.
+---Whether that item has to be in this trunk first. Gear of kind `give` is an item
+---handed to the player, so it always comes out of the trunk — otherwise the take
+---would mint one. Config.TrunkGear.RequireItems only relaxes worn gear (vest,
+---helmet, turnout coat), which is clothing on the ped and not an item at all.
 ---@param def table
 ---@return string|nil item
 local function trunkItem(def)
+    if def.give then return gearItem(def) end
     if Config.TrunkGear.RequireItems ~= true then return nil end
     return gearItem(def)
 end
