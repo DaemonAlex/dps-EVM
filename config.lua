@@ -247,3 +247,172 @@ Config.Constants = {
     CACHE_JOB_DURATION = 300000,      -- 5 minutes
     CACHE_VEHICLE_DURATION = 60000,   -- 1 minute
 }
+
+-----------------------------------------------------------
+-- [[ 10. TRUNK GEAR ]]  (Task 7b, DPS 2026-09-28)
+-- Vehiclegear 1.1.5-dps1 folded in: original by Lapertaja (CC BY-NC-SA 4.0,
+-- docs/licenses/vehiclegear.txt), DPS fork by DaemonAlex. Everything the old
+-- resource kept at the top level of its own Config lives under Config.TrunkGear
+-- so no key can collide with the workshop's.
+--
+-- Damon 2026-09-27: "add fire gear to engines and other fire cars as well as
+-- police, swat and other jobs in vehicles that need them". Gear is therefore
+-- chosen by the vehicle's DEPARTMENT (data/emergency.json), not by a hand list.
+-----------------------------------------------------------
+Config.TrunkGear = {
+    enabled = true,                          -- one switch for the whole feature
+
+    ---------------------------------------------------------
+    -- Which vehicles carry gear
+    ---------------------------------------------------------
+    -- true: every model in data/emergency.json carries its department's kit, so a
+    -- new emergency pack needs no edit here. allowedVehicles is the per-model
+    -- override and is read either way; with AutoVehicles = false it is the only list.
+    AutoVehicles = true,
+    allowedVehicles = {
+        -- gbpolstanier = { 'bproof', 'refvest', 'helmet' },   -- model = kit
+    },
+
+    -- Department -> kit. The keys are the dept values in data/emergency.json
+    -- (police, police_swat, bcso, sasp, fib, doc, dfw, uscg, rpd, rcso, lsfd, rfd,
+    -- sams, omc, rmc). A department missing here falls through to DefaultGear.
+    DeptGear = {
+        police      = { 'bproof', 'refvest', 'helmet' },
+        police_swat = { 'heavy', 'bproof', 'helmet' },
+        bcso        = { 'bproof', 'refvest', 'helmet' },
+        sasp        = { 'bproof', 'refvest', 'helmet' },
+        fib         = { 'bproof', 'refvest', 'helmet' },
+        doc         = { 'bproof', 'refvest', 'helmet' },
+        dfw         = { 'bproof', 'refvest', 'helmet' },
+        uscg        = { 'bproof', 'refvest', 'helmet' },
+        rpd         = { 'bproof', 'refvest', 'helmet' },
+        rcso        = { 'bproof', 'refvest', 'helmet' },
+        lsfd        = { 'turnout', 'firehelmet', 'refvest' },
+        rfd         = { 'turnout', 'firehelmet', 'refvest' },
+        sams        = { 'refvest', 'medbag' },
+        omc         = { 'refvest', 'medbag' },
+        rmc         = { 'refvest', 'medbag' },
+    },
+    -- Only reached by a model that IS in data/emergency.json but whose department
+    -- has no kit above — the dept 'none' and 'unsorted' rows (coroner vans, tow
+    -- trucks, 13 models on 2026-09-28). A reflective vest is safe on any of them.
+    DefaultGear = { 'refvest' },
+
+    ---------------------------------------------------------
+    -- Who may take it
+    ---------------------------------------------------------
+    -- true: reuse the workshop job set (qbx_core types leo + ems + Config.ExtraWorkshopJobs),
+    -- so fire and medical jobs are in without an edit. Authorizedjobs is only read
+    -- when AutoJobs = false.
+    AutoJobs = true,
+    Authorizedjobs = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+
+    -- false: an allowed job may only take gear off its own family's vehicles, so
+    -- police cannot pull turnout gear out of a fire engine. true: any allowed job
+    -- may take any department's gear.
+    CrossDept = false,
+    -- Department -> the job names that may take its kit. A department left out is
+    -- open to every allowed job. Job names are the canon in qbx_core/shared/jobs.lua.
+    DeptJobs = {
+        police      = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        police_swat = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        bcso        = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        sasp        = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        fib         = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        doc         = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        dfw         = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        uscg        = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        rpd         = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        rcso        = { 'police', 'bcso', 'sasp', 'fib', 'doc', 'dfw', 'rpd', 'rcso', 'uscg' },
+        lsfd        = { 'lsfd', 'rfd' },
+        rfd         = { 'lsfd', 'rfd' },
+        sams        = { 'sams', 'omc', 'rmc' },
+        omc         = { 'sams', 'omc', 'rmc' },
+        rmc         = { 'sams', 'omc', 'rmc' },
+    },
+
+    ---------------------------------------------------------
+    -- Behaviour (upstream keys, unchanged defaults)
+    ---------------------------------------------------------
+    RequireUnlocked = true,                  -- the vehicle must be unlocked
+    RequireItems = true,                     -- the item must be in that trunk (only bproof and medbag have one)
+    NotifyDuration = 5,                      -- seconds
+    Duration = 3500,                         -- progress circle, ms
+    Sound = { Enable = false, Name = 'CHALLENGE_UNLOCKED', Set = 'HUD_AWARDS' },
+
+    ---------------------------------------------------------
+    -- The gear itself
+    ---------------------------------------------------------
+    -- slot: vest (component 9) / torso (component 11) / head (prop 0), or false for
+    --       item-only gear that changes no clothing.
+    -- item: the ox_inventory item that must be in the trunk (false = none).
+    -- give: true hands that item to the player instead of consuming it.
+    -- male/female: { drawable, texture } for that gender, or false for no clothing change.
+    --   Freemode drawables differ between mp_m_freemode_01 and mp_f_freemode_01;
+    --   one number for both was the upstream bug.
+    -- Set an entry to false to switch that piece off, e.g. Config.TrunkGear.Gear.heavy = false
+    Gear = {
+        bproof = {
+            label = 'Grab bulletproof vest', busy = 'Equipping bulletproof vest…',
+            done = "You've equipped a bulletproof vest.", icon = 'fa-solid fa-shield-halved',
+            slot = 'vest', armour = 50, item = 'armour',
+            male = { 15, 2 }, female = { 17, 2 },        -- wasabi_police_v2 tactical outfit, verified in game
+        },
+        heavy = {
+            label = 'Grab heavy vest', busy = 'Equipping heavy vest…',
+            done = "You've equipped a heavy vest.", icon = 'fa-solid fa-shield-halved',
+            slot = 'vest', armour = 75, item = false,
+            male = { 20, 0 }, female = { 20, 0 },        -- female TUNE
+        },
+        refvest = {
+            label = 'Grab reflective vest', busy = 'Putting on reflective vest…',
+            done = "You've put on a reflective vest.", icon = 'fa-solid fa-vest',
+            slot = 'vest', armour = 0, item = false,
+            male = { 21, 0 }, female = { 21, 0 },        -- female TUNE
+        },
+        helmet = {
+            label = 'Grab bulletproof helmet', busy = 'Equipping bulletproof helmet…',
+            done = "You've equipped a bulletproof helmet.", icon = 'fa-solid fa-hard-hat',
+            slot = 'head', armour = 25, item = false,
+            male = { 150, 0 }, female = { 149, 0 },
+        },
+        turnout = {
+            label = 'Grab turnout coat', busy = 'Pulling on turnout gear…',
+            done = "You've pulled on your turnout coat.", icon = 'fa-solid fa-fire-extinguisher',
+            slot = 'torso', armour = 0, item = false,
+            male = { 15, 2 }, female = { 17, 2 },        -- TUNE: placeholder, the LEO vest numbers on component 11
+        },
+        firehelmet = {
+            label = 'Grab fire helmet', busy = 'Putting on fire helmet…',
+            done = "You've put on a fire helmet.", icon = 'fa-solid fa-helmet-safety',
+            slot = 'head', armour = 0, item = false,
+            male = { 150, 0 }, female = { 149, 0 },      -- TUNE: placeholder, the LEO helmet numbers
+        },
+        medbag = {
+            label = 'Grab a medical bag', busy = 'Lifting the medical bag out…',
+            done = "You've taken a medical bag.", icon = 'fa-solid fa-briefcase-medical',
+            slot = false, armour = 0, item = 'medbag', give = true,
+            male = false, female = false,                -- item only: no clothing change
+        },
+    },
+    -- Menu order (Gear above is a map, so the order lives here).
+    GearOrder = { 'bproof', 'heavy', 'refvest', 'helmet', 'turnout', 'firehelmet', 'medbag' },
+
+    -- The "put it back" option, one per slot in Gear.SLOTS.
+    Slots = {
+        vest = { label = 'Remove vest', busy = 'Taking off vest…', done = 'You removed your vest.', icon = 'fa-solid fa-vest' },
+        torso = { label = 'Remove turnout coat', busy = 'Taking off turnout gear…', done = 'You took off your turnout coat.', icon = 'fa-solid fa-fire-extinguisher' },
+        head = { label = 'Remove helmet', busy = 'Taking off helmet…', done = 'You removed your helmet.', icon = 'fa-solid fa-hard-hat' },
+    },
+    SlotOrder = { 'vest', 'torso', 'head' },
+
+    Translation = {
+        notifyTitle = 'Gear system',
+        not_in_trunk = 'That is not in the trunk.',
+        no_room = 'You have no room for that.',
+        wrong_dept = "That is another department's gear.",
+        no_job = 'Your job does not carry that gear.',
+        failed = 'That did not work.',
+        not_returned = 'It would not go back in the trunk.',
+    },
+}

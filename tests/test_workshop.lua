@@ -112,3 +112,69 @@ eq('a saved list that matches a preset names it', Workshop.sirenPresetOf({ 19, 2
 eq('order matters', Workshop.sirenPresetOf({ 20, 19, 21, 22, 23 }), nil)
 eq('a hand-built list is custom', Workshop.sirenPresetOf({ 1, 2, 3 }), nil)
 eq('nothing is custom', Workshop.sirenPresetOf(nil), nil)
+
+-- Task 7b: trunk gear (Vehiclegear folded in). Gear.allowedFor and Gear.jobAllowed
+-- are the whole vehicle-and-job rule; the controller ruling 2026-09-27 puts the
+-- department kit between the per-model override and DefaultGear.
+local em = {
+    gbpolstanier = { dept = 'police', kind = 'Cruiser' },
+    hvfiretruk = { dept = 'lsfd', kind = 'Fire engine' },
+    hvswatalamo = { dept = 'police_swat', kind = 'Tactical' },
+}
+local gcfg = { TrunkGear = { AutoVehicles = true, DefaultGear = { 'bproof', 'helmet' },
+    allowedVehicles = { gbpolstanier = { 'bproof', 'refvest' } },
+    AutoJobs = true, Authorizedjobs = { 'police' } } }
+eq('auto: emergency model gets default gear', Gear.allowedFor('hvfiretruk', gcfg, em)[1], 'bproof')
+eq('explicit override wins', Gear.allowedFor('gbpolstanier', gcfg, em)[2], 'refvest')
+eq('civilian model not allowed', Gear.allowedFor('sultan', gcfg, em), nil)
+gcfg.TrunkGear.AutoVehicles = false
+eq('manual list only', Gear.allowedFor('hvfiretruk', gcfg, em), nil)
+eq('an override still works with the auto list off', Gear.allowedFor('gbpolstanier', gcfg, em)[1], 'bproof')
+eq('auto jobs use workshop set', Gear.jobAllowed('sams', gcfg, { sams = true }), true)
+gcfg.TrunkGear.AutoJobs = false
+eq('manual jobs', Gear.jobAllowed('sams', gcfg, { sams = true }), false)
+eq('manual jobs ok', Gear.jobAllowed('police', gcfg, {}), true)
+eq('no job at all is refused', Gear.jobAllowed(nil, gcfg, { police = true }), false)
+
+-- Department kits (ruling 2026-09-27): DeptGear[dept] beats DefaultGear, the
+-- per-model override beats both, and the auto list is still the gate.
+gcfg.TrunkGear.AutoVehicles, gcfg.TrunkGear.AutoJobs = true, true
+gcfg.TrunkGear.DeptGear = {
+    police = { 'bproof', 'refvest', 'helmet' },
+    police_swat = { 'heavy', 'bproof', 'helmet' },
+    lsfd = { 'turnout', 'firehelmet', 'refvest' },
+}
+eq('dept gear wins over default', Gear.allowedFor('hvfiretruk', gcfg, em)[1], 'turnout')
+eq('swat gets heavy', Gear.allowedFor('hvswatalamo', gcfg, em)[1], 'heavy')
+eq('override still wins', Gear.allowedFor('gbpolstanier', gcfg, em)[2], 'refvest')
+eq('a department with no kit falls back to the default',
+    Gear.allowedFor('bccoroner', gcfg, { bccoroner = { dept = 'none' } })[1], 'bproof')
+
+-- CrossDept = false keeps an allowed job to its own family's vehicles, so police
+-- cannot pull turnout gear out of a fire engine.
+gcfg.TrunkGear.DeptJobs = { police = { 'police', 'bcso' }, police_swat = { 'police', 'bcso' }, lsfd = { 'lsfd', 'rfd' } }
+eq('own department ok', Gear.deptAllowed('police', 'police', gcfg), true)
+eq('police may not raid an engine', Gear.deptAllowed('police', 'lsfd', gcfg), false)
+eq('fire may take fire gear off another fire rig', Gear.deptAllowed('rfd', 'lsfd', gcfg), true)
+eq('a department with no job list is open to any allowed job', Gear.deptAllowed('police', 'none', gcfg), true)
+gcfg.TrunkGear.CrossDept = true
+eq('CrossDept opens every department', Gear.deptAllowed('police', 'lsfd', gcfg), true)
+gcfg.TrunkGear.CrossDept = false
+
+-- Gear.buildIndex is the table the client hashes: one entry per model that
+-- carries a kit, and only gear keys that still have a definition.
+gcfg.TrunkGear.Gear = { bproof = {}, helmet = {}, turnout = {}, firehelmet = {}, refvest = {}, heavy = {} }
+local gi = Gear.buildIndex(gcfg, em)
+eq('index has the fire engine', gi.hvfiretruk.gear[1], 'turnout')
+eq('index carries the department', gi.hvfiretruk.dept, 'lsfd')
+check('index set is a lookup', gi.hvfiretruk.set.turnout == true)
+eq('index skips a model with no kit', gi.sultan, nil)
+gcfg.TrunkGear.Gear.turnout = nil
+gi = Gear.buildIndex(gcfg, em)
+eq('a disabled gear key drops out of the set', gi.hvfiretruk.set.turnout, nil)
+check('the rest of the kit stays', gi.hvfiretruk.set.firehelmet == true)
+
+-- Slots are the structural half: component 9 vest, component 11 turnout coat, prop 0 head.
+eq('vest slot', Gear.SLOTS.vest.index, 9)
+eq('torso slot', Gear.SLOTS.torso.index, 11)
+eq('head slot is a prop', Gear.SLOTS.head.kind, 'prop')

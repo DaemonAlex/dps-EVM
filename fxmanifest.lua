@@ -16,7 +16,7 @@ shared_scripts {
     'shared/search.lua',
     'shared/workshop.lua',
 }
-client_scripts { 'client.lua', 'client/workshop.lua', 'client/repair.lua', 'client/target.lua' }
+client_scripts { '@qbx_core/modules/playerdata.lua', 'client.lua', 'client/workshop.lua', 'client/repair.lua', 'client/target.lua', 'client/gear.lua' }
 server_scripts { '@oxmysql/lib/MySQL.lua', 'server.lua' }
 
 ui_page 'html/index.html'

@@ -173,6 +173,9 @@ local function openPanel(mode)
     buildRows(serverData)
     -- The sirens sheet keys tones on the vehicles.meta game name, not the spawn name.
     WorkshopClient.setGames(serverData.games)
+    -- Trunk gear asks for the department map itself at start; this is its fallback
+    -- for a client that joined before the server had read data/emergency.json.
+    if GearClient and GearClient.setEmergency then GearClient.setEmergency(serverData.emergency) end
     if #ALL == 0 then
         notify('The vehicle registry is empty; nothing to show.', 'error')
         return

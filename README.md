@@ -274,6 +274,19 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [oxmysql](https://github.com/overextended/oxmysql) - Reliable database connector
 - FiveM Community - Continuous feedback and support
 
+### Trunk gear
+
+The trunk gear system (`client/gear.lua`, the `-- ── trunk gear ──` block in
+`server.lua`, `Config.TrunkGear` and `Gear.*` in `shared/workshop.lua`) is
+[Vehiclegear](https://github.com/Lapertaja/Vehiclegear) by **Lapertaja**, folded in
+from the DPS fork 1.1.5-dps1 by **DaemonAlex** (2026-09-28). Vehiclegear is
+published under **CC BY-NC-SA 4.0**; its licence text is kept verbatim at
+[docs/licenses/vehiclegear.txt](docs/licenses/vehiclegear.txt) and those terms
+cover that code. Changes made while folding it in: the vehicle list now comes from
+`data/emergency.json` by department, the job list from the workshop job set, gear is
+data-driven (turnout coat, fire helmet and medical bag added), and the item moves
+server-side only, against a per-player count of what was taken.
+
 ---
 
 **Original concept and code by @daemonalex** 🚀

@@ -1092,3 +1092,198 @@ AddEventHandler('playerDropped', function()
     fieldRepairCooldowns[source] = nil
     busy[source] = nil
 end)
+
+-----------------------------------------------------------------------
+-- ── trunk gear ──  (Task 7b, DPS 2026-09-28)
+-- Vehiclegear 1.1.5-dps1 folded in: original by Lapertaja (CC BY-NC-SA 4.0,
+-- docs/licenses/vehiclegear.txt), DPS fork by DaemonAlex. The client half is
+-- client/gear.lua; the rule is Gear.* in shared/workshop.lua.
+--
+-- The fork's server half took a plate and an item name off the client and moved
+-- items in and out of that trunk on trust. Here every call re-derives everything:
+-- the job (Gear.jobAllowed over the workshop set), the vehicle the caller claims
+-- (resolveCallerVehicle: a real vehicle within 10 m), the department kit that
+-- vehicle carries, and the gear key inside it. GEAR_OUT counts what each player
+-- has taken so a "put it back" call cannot mint items that were never taken.
+-----------------------------------------------------------------------
+
+local GEAR_BY_HASH = nil   -- model hash (unsigned) -> { model, dept, gear, set }
+local GEAR_OUT = {}        -- src -> { [gearKey] = count taken and not yet returned }
+
+---Built on first use, because data/emergency.json is read in the start-up thread.
+---@return table
+local function gearIndex()
+    if GEAR_BY_HASH and next(GEAR_BY_HASH) then return GEAR_BY_HASH end
+    GEAR_BY_HASH = {}
+    local n = 0
+    for model, entry in pairs(Gear.buildIndex(Config, EMERGENCY)) do
+        GEAR_BY_HASH[joaat(model) % 0x100000000] = entry
+        n = n + 1
+    end
+    if n > 0 then lib.print.info(('trunk gear: %d models carry a department kit'):format(n)) end
+    return GEAR_BY_HASH
+end
+
+---The department map and the workshop job set, for client/gear.lua's target options.
+---Read-only and not sensitive: every allowed job needs it, not just ace holders.
+lib.callback.register('dps-fleet:server:emergencyIndex', function()
+    local jobs = {}
+    for name in pairs(workshopJobSet()) do jobs[#jobs + 1] = name end
+    table.sort(jobs)
+    return EMERGENCY, jobs
+end)
+
+---Everything a gear call needs, all of it re-derived server-side.
+---@param src number
+---@param netId any
+---@param key any
+---@return table|nil ctx { veh, entry, def, key, jobName }, string|nil reason
+local function gearContext(src, netId, key)
+    local tg = Config.TrunkGear
+    if not tg or tg.enabled == false then return nil, 'Trunk gear is switched off.' end
+    if type(key) ~= 'string' or #key == 0 or #key > 40 then return nil, 'Unknown gear.' end
+
+    local def = type(tg.Gear) == 'table' and tg.Gear[key] or nil
+    if type(def) ~= 'table' then return nil, 'That gear does not exist.' end
+
+    local jobName = playerJob(src)
+    if not Gear.jobAllowed(jobName, Config, workshopJobSet()) then
+        return nil, (tg.Translation and tg.Translation.no_job) or 'Your job does not carry that gear.'
+    end
+
+    local veh = resolveCallerVehicle(src, netId)
+    if not veh then return nil, 'Stand at that vehicle.' end
+
+    local entry = gearIndex()[GetEntityModel(veh) % 0x100000000]
+    if not entry or not entry.set[key] then return nil, 'That vehicle does not carry that gear.' end
+    if not Gear.deptAllowed(jobName, entry.dept, Config) then
+        return nil, (tg.Translation and tg.Translation.wrong_dept) or "That is another department's gear."
+    end
+
+    return { veh = veh, entry = entry, def = def, key = key, jobName = jobName }
+end
+
+---The ox_inventory trunk of a vehicle, by the plate the server reads off it.
+---ox_inventory keys trunks 'trunk<plate>' with inventory:trimplate on (ox.cfg).
+---@param veh number
+---@return table|nil inventory
+local function trunkOf(veh)
+    if GetResourceState('ox_inventory') ~= 'started' then return nil end
+    local plate = qbx.getVehiclePlate(veh)
+    if type(plate) ~= 'string' then return nil end
+    plate = plate:match('^%s*(.-)%s*$') or ''
+    if plate == '' then return nil end
+    local ok, inv = pcall(function() return exports.ox_inventory:GetInventory('trunk' .. plate, false) end)
+    if not ok or type(inv) ~= 'table' then return nil end
+    return inv
+end
+
+---@param inv table
+---@param item string
+---@return number count
+local function countIn(inv, item)
+    local ok, count = pcall(function() return exports.ox_inventory:GetItemCount(inv, item) end)
+    if not ok then return 0 end
+    return tonumber(count) or 0
+end
+
+---The ox_inventory item this piece of gear involves, or nil when it involves none.
+---@param def table
+---@return string|nil item
+local function gearItem(def)
+    return type(def.item) == 'string' and def.item ~= '' and def.item or nil
+end
+
+---Whether that item has to be in this trunk first (Config.TrunkGear.RequireItems).
+---With RequireItems off, `give` gear is still handed over — it just is not taken
+---out of the trunk.
+---@param def table
+---@return string|nil item
+local function trunkItem(def)
+    if Config.TrunkGear.RequireItems ~= true then return nil end
+    return gearItem(def)
+end
+
+---Is this gear there for the taking? Asked before the progress circle runs, so a
+---player is not made to work for a trunk that has nothing in it.
+lib.callback.register('dps-fleet:server:gearCheck', function(source, netId, key)
+    local ctx, reason = gearContext(source, netId, key)
+    if not ctx then return false, reason end
+    local tr = Config.TrunkGear.Translation or {}
+
+    local fromTrunk = trunkItem(ctx.def)
+    if fromTrunk then
+        local trunk = trunkOf(ctx.veh)
+        if not trunk or countIn(trunk, fromTrunk) < 1 then return false, tr.not_in_trunk or 'That is not in the trunk.' end
+    end
+    if ctx.def.give then
+        local item = gearItem(ctx.def)
+        local ok, canCarry = pcall(function() return exports.ox_inventory:CanCarryItem(source, item, 1) end)
+        if not ok or not canCarry then return false, tr.no_room or 'You have no room for that.' end
+    end
+    return true
+end)
+
+---Take it: the item leaves the trunk here and only here. Gear marked `give` lands
+---in the player's inventory; everything else is worn, so the item is consumed.
+lib.callback.register('dps-fleet:server:gearTake', function(source, netId, key)
+    local ctx, reason = gearContext(source, netId, key)
+    if not ctx then return false, reason end
+    local tr = Config.TrunkGear.Translation or {}
+
+    local item = gearItem(ctx.def)
+    local fromTrunk = trunkItem(ctx.def)
+    if fromTrunk then
+        local trunk = trunkOf(ctx.veh)
+        if not trunk or countIn(trunk, fromTrunk) < 1 then return false, tr.not_in_trunk or 'That is not in the trunk.' end
+
+        local removed, result = pcall(function() return exports.ox_inventory:RemoveItem(trunk, fromTrunk, 1) end)
+        if not removed or result == false then return false, tr.failed or 'That did not work.' end
+    end
+
+    if ctx.def.give and item then
+        local added, result = pcall(function() return exports.ox_inventory:AddItem(source, item, 1) end)
+        if not added or result == false then
+            -- straight back where it came from, so a full inventory costs nothing
+            if fromTrunk then
+                local trunk = trunkOf(ctx.veh)
+                if trunk then pcall(function() return exports.ox_inventory:AddItem(trunk, fromTrunk, 1) end) end
+            end
+            return false, tr.no_room or 'You have no room for that.'
+        end
+    end
+
+    local out = GEAR_OUT[source] or {}
+    out[key] = (out[key] or 0) + 1
+    GEAR_OUT[source] = out
+    lib.print.info(('trunk gear: src %s (job %s) took %s off %s'):format(source, ctx.jobName or 'none', key, ctx.entry.model))
+    return true
+end)
+
+---Put it back. Only a piece this player actually took can come back, so the call
+---cannot be used to mint items. `give` gear stays with the player: there is nothing
+---to return.
+lib.callback.register('dps-fleet:server:gearStow', function(source, netId, key)
+    local ctx, reason = gearContext(source, netId, key)
+    if not ctx then return false, reason end
+    local tr = Config.TrunkGear.Translation or {}
+
+    local out = GEAR_OUT[source]
+    if not out or (out[key] or 0) < 1 then return false, tr.failed or 'That did not work.' end
+
+    local item = trunkItem(ctx.def)
+    if item and not ctx.def.give then
+        local trunk = trunkOf(ctx.veh)
+        if not trunk then return false, tr.not_returned or 'It would not go back in the trunk.' end
+        local ok, result = pcall(function() return exports.ox_inventory:AddItem(trunk, item, 1) end)
+        if not ok or result == false then return false, tr.not_returned or 'It would not go back in the trunk.' end
+    end
+
+    out[key] = out[key] - 1
+    lib.print.info(('trunk gear: src %s (job %s) put %s back in %s'):format(source, ctx.jobName or 'none', key, ctx.entry.model))
+    return true
+end)
+
+AddEventHandler('playerDropped', function()
+    GEAR_OUT[source] = nil
+end)

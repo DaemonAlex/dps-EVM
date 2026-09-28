@@ -718,3 +718,124 @@ function Workshop.sirenPresetOf(list)
     end
     return nil
 end
+
+-----------------------------------------------------------------------
+-- Trunk gear (Task 7b, DPS 2026-09-28). Vehiclegear 1.1.5-dps1 folded in:
+-- original by Lapertaja (CC BY-NC-SA 4.0, docs/licenses/vehiclegear.txt), DPS
+-- fork by DaemonAlex. This is the pure half — which kit a model carries and
+-- which job may take it. No natives and no Config read except the table handed
+-- in, so client, server and tests all run the same rule.
+-----------------------------------------------------------------------
+Gear = Gear or {}
+
+-- Where a piece of gear is worn. kind 'component' is SetPedComponentVariation,
+-- 'prop' is SetPedPropIndex; one piece per slot, so a second vest is refused
+-- while one is on (upstream's BProofTaken/HVestTaken/RefVestTaken, generalised).
+Gear.SLOTS = {
+    vest = { kind = 'component', index = 9 },   -- body armour / reflective vest
+    torso = { kind = 'component', index = 11 }, -- turnout coat
+    head = { kind = 'prop', index = 0 },        -- helmet
+}
+
+---The kit a model carries, or nil when it carries none. Resolution order
+---(controller ruling 2026-09-27): the per-model override, then the department
+---kit, then DefaultGear — the last two only when AutoVehicles is on and the
+---model is in the emergency index. AutoVehicles = false uses the override list
+---and nothing else.
+---@param model string|nil registry model name, lowercase
+---@param cfg table Config (reads cfg.TrunkGear only)
+---@param emergencyIndex table<string, { dept: string, kind: string }>|nil data/emergency.json
+---@return table|nil gearList
+function Gear.allowedFor(model, cfg, emergencyIndex)
+    if type(model) ~= 'string' or model == '' then return nil end
+    local tg = cfg and cfg.TrunkGear
+    if not tg then return nil end
+
+    local override = tg.allowedVehicles and tg.allowedVehicles[model]
+    if type(override) == 'table' then return override end
+
+    if tg.AutoVehicles == false then return nil end
+    local entry = emergencyIndex and emergencyIndex[model]
+    if type(entry) ~= 'table' then return nil end
+
+    local byDept = entry.dept and tg.DeptGear and tg.DeptGear[entry.dept]
+    if type(byDept) == 'table' then return byDept end
+    return type(tg.DefaultGear) == 'table' and tg.DefaultGear or nil
+end
+
+---Whether a job may take trunk gear at all. AutoJobs reuses the workshop job
+---set the server derived from qbx_core (LEO + EMS + Config.ExtraWorkshopJobs),
+---so a new department needs no edit; Authorizedjobs is only read with AutoJobs off.
+---@param jobName string|nil
+---@param cfg table
+---@param workshopJobSet table<string, boolean>|nil
+---@return boolean
+function Gear.jobAllowed(jobName, cfg, workshopJobSet)
+    if type(jobName) ~= 'string' or jobName == '' then return false end
+    local tg = cfg and cfg.TrunkGear
+    if not tg then return false end
+    if tg.AutoJobs == false then
+        for _, name in ipairs(tg.Authorizedjobs or {}) do
+            if name == jobName then return true end
+        end
+        return false
+    end
+    return (workshopJobSet and workshopJobSet[jobName]) == true
+end
+
+---Whether an already-allowed job may take THIS vehicle's department kit.
+---CrossDept = true opens every department; otherwise the job must be in
+---cfg.TrunkGear.DeptJobs[dept]. A department with no list (dept 'none' or
+---'unsorted' in data/emergency.json) is open to any allowed job.
+---@param jobName string|nil
+---@param dept string|nil
+---@param cfg table
+---@return boolean
+function Gear.deptAllowed(jobName, dept, cfg)
+    local tg = cfg and cfg.TrunkGear
+    if not tg then return false end
+    if tg.CrossDept == true then return true end
+    local jobs = dept and tg.DeptJobs and tg.DeptJobs[dept]
+    if type(jobs) ~= 'table' then return true end
+    for _, name in ipairs(jobs) do
+        if name == jobName then return true end
+    end
+    return false
+end
+
+---Every model that carries a kit, resolved once so a target's canInteract is a
+---lookup and not a rule run. A gear key with no live cfg.TrunkGear.Gear entry is
+---dropped (that is how a piece is switched off), and a model left with nothing
+---is not in the table at all.
+---@param cfg table
+---@param emergencyIndex table|nil
+---@return table<string, { model: string, dept: string|nil, gear: table, set: table<string, boolean> }>
+function Gear.buildIndex(cfg, emergencyIndex)
+    local out = {}
+    local tg = cfg and cfg.TrunkGear
+    if not tg then return out end
+
+    local function add(model, dept)
+        if type(model) ~= 'string' or out[model] then return end
+        local gear = Gear.allowedFor(model, cfg, emergencyIndex)
+        if type(gear) ~= 'table' or #gear == 0 then return end
+        local set, kept = {}, {}
+        for _, key in ipairs(gear) do
+            if type(key) == 'string' and type(tg.Gear) == 'table' and type(tg.Gear[key]) == 'table' and not set[key] then
+                set[key] = true
+                kept[#kept + 1] = key
+            end
+        end
+        if #kept == 0 then return end
+        out[model] = { model = model, dept = dept, gear = kept, set = set }
+    end
+
+    for model in pairs(tg.allowedVehicles or {}) do
+        local entry = emergencyIndex and emergencyIndex[model]
+        add(model, type(entry) == 'table' and entry.dept or nil)
+    end
+    for model, entry in pairs(emergencyIndex or {}) do
+        add(model, type(entry) == 'table' and entry.dept or nil)
+    end
+    return out
+end
