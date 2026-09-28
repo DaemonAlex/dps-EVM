@@ -225,7 +225,8 @@ local function canTake(key, entity)
     local job = jobName()
     if not Gear.jobAllowed(job, Config, JOB_SET) then return false end
     if not Gear.deptAllowed(job, entry.dept, Config) then return false end
-    if tg.RequireUnlocked and GetVehicleDoorLockStatus(entity) ~= 1 then return false end
+    -- 0 = never locked (a fresh spawn), 1 = unlocked; ox_inventory opens the trunk on both
+    if tg.RequireUnlocked and GetVehicleDoorLockStatus(entity) > 1 then return false end
     return true
 end
 

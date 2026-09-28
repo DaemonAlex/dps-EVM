@@ -434,6 +434,7 @@ RegisterNUICallback('ws:apply', function(req, cb)
     if not veh then cb({ ok = false, gone = true, reason = 'That vehicle is gone.' }) return end
 
     local ok, message = WorkshopClient.apply(veh, section, key, value)
+    if ok then Wait(50) end   -- extras and mods report their new state a frame later
     -- an apply may open an ox_lib dialog, which drops NUI focus on the way out
     if isOpen then SetNuiFocus(true, true) end
     local sheet = DoesEntityExist(veh) and WorkshopClient.sheet(veh, section) or nil
