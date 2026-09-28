@@ -73,6 +73,18 @@ local function modelOf(veh)
     return Workshop.modelKey(spawnCode, GetDisplayNameFromVehicleModel(hash))
 end
 
+---The vehicles.meta game name, case intact (modelOf lowercases it and answers the
+---spawn code, which neither GTA's label keys nor LVC's assignment keys know about).
+---GTA keeps 11 characters of a game name, so this is already short. Used by the
+---livery label lookup and by the siren section below.
+---@param veh number
+---@return string|nil
+local function gameNameOf(veh)
+    local name = GetDisplayNameFromVehicleModel(GetEntityModel(veh))
+    if type(name) ~= 'string' or name == '' or name == 'CARNOTFOUND' then return nil end
+    return name
+end
+
 ---Server halves of the workshop (custom liveries, presets, repair quotes) land in
 ---Task 6. ox_lib rejects the await when a callback is not registered, which would
 ---throw inside the builder, so every call is wrapped: a failure, nil or false all
@@ -121,16 +133,20 @@ local EMERGENCY_LIVERY_PATTERNS = {
     [5] = 'Slicktop', [6] = 'K9 Unit', [7] = 'Traffic', [8] = 'Supervisor',
 }
 
+-- GTA's own label keys are built from the vehicles.meta game name, not from the
+-- spawn code, so this one lookup uses gameNameOf; every model-keyed table stays on
+-- the spawn code (modelOf). A vehicle with no game name skips straight to the
+-- department patterns below.
 local function GetLiveryLabel(veh, liveryIndex)
-    local modelName = modelOf(veh)
-    local cacheKey = modelName .. '_' .. liveryIndex
+    local gameName = gameNameOf(veh)
+    local cacheKey = (gameName or modelOf(veh)) .. '_' .. liveryIndex
     if liveryLabelCache[cacheKey] then return liveryLabelCache[cacheKey] end
 
-    local attempts = {
-        ('%s_LIVERY_%d'):format(modelName:upper(), liveryIndex),
-        ('%s_LIV%d'):format(modelName:upper(), liveryIndex),
-        ('LIVERY_%s_%d'):format(modelName:upper(), liveryIndex),
-    }
+    local attempts = gameName and {
+        ('%s_LIVERY_%d'):format(gameName:upper(), liveryIndex),
+        ('%s_LIV%d'):format(gameName:upper(), liveryIndex),
+        ('LIVERY_%s_%d'):format(gameName:upper(), liveryIndex),
+    } or {}
     for _, labelKey in ipairs(attempts) do
         local label = GetLabelText(labelKey)
         if label and label ~= 'NULL' and label ~= labelKey then
@@ -565,17 +581,6 @@ AddEventHandler('onClientResourceStart', function(resource)
         if fillSirenCache() == 0 then SetTimeout(15000, fillSirenCache) end
     end)
 end)
-
----The name LVC looks the assignment up by: GetDisplayNameFromVehicleModel on the
----live vehicle, case intact (modelOf lowercases it, which would miss the key).
----GTA keeps 11 characters of a game name, so this is already short.
----@param veh number
----@return string|nil
-local function gameNameOf(veh)
-    local name = GetDisplayNameFromVehicleModel(GetEntityModel(veh))
-    if type(name) ~= 'string' or name == '' or name == 'CARNOTFOUND' then return nil end
-    return name
-end
 
 ---@param pos number
 ---@return string
