@@ -20,8 +20,13 @@
         which re-checks job, department, gear key and the vehicle the player
         claims, and counts what each player has out so nothing can be duplicated.
 
-    Performance: the target options are registered once at start; canInteract is a
-    hash lookup in GEAR_BY_HASH plus a table lookup. No threads, no loops.
+    Performance: the target options are registered once at start (one
+    addGlobalVehicle call, re-run only if ox_target restarts). canInteract does no
+    work beyond a model-hash lookup in GEAR_BY_HASH, table lookups for the gear key
+    / the worn slot / the job and department rule, a read of QBX.PlayerData.job.name
+    (kept current by qbx_core's own event, not polled), and — only while
+    Config.TrunkGear.RequireUnlocked is on — one GetVehicleDoorLockStatus native.
+    No threads, no loops.
 ]]
 
 local FEMALE_PED = joaat('mp_f_freemode_01')
@@ -29,7 +34,7 @@ local FEMALE_PED = joaat('mp_f_freemode_01')
 local GEAR_BY_HASH = {}   -- model hash (unsigned) -> { model, dept, gear, set }
 local JOB_SET = {}        -- job name -> true, the workshop set as the server derived it
 local JOB_LIST = {}       -- the same names as an array, for ox_target's groups filter
-local worn = {}           -- slot name -> { key, original = { drawable, texture } | nil, armour }
+local worn = {}           -- slot name -> { key, original = { drawable, texture } | nil, applied = armour actually added }
 local registered = false
 local haveIndex = false
 
@@ -148,8 +153,19 @@ end
 ---@param key string
 ---@param def table
 local function wear(key, def)
-    local armour = tonumber(def.armour) or 0
-    if armour > 0 then SetPedArmour(cache.ped, math.min(GetPedArmour(cache.ped) + armour, 100)) end
+    -- Armour caps at 100, so what a piece actually adds is not always what it is
+    -- worth: 50 on a ped already at 75 adds 25. The delta is remembered, not the
+    -- nominal value, so taking it off cannot cost armour it never gave.
+    local want = tonumber(def.armour) or 0
+    local applied = 0
+    if want > 0 then
+        local before = GetPedArmour(cache.ped)
+        local after = math.min(before + want, 100)
+        if after > before then
+            SetPedArmour(cache.ped, after)
+            applied = after - before
+        end
+    end
 
     local slotName = def.slot
     local slot = slotName and Gear.SLOTS[slotName] or nil
@@ -168,7 +184,7 @@ local function wear(key, def)
         original = { drawable = GetPedDrawableVariation(cache.ped, slot.index), texture = GetPedTextureVariation(cache.ped, slot.index) }
         if drawable then SetPedComponentVariation(cache.ped, slot.index, drawable, texture, 1) end
     end
-    worn[slotName] = { key = key, original = original, armour = armour }
+    worn[slotName] = { key = key, original = original, applied = applied }
 end
 
 ---@param slotName string
@@ -177,7 +193,9 @@ local function takeOff(slotName)
     local slot = Gear.SLOTS[slotName]
     if not piece or not slot then return end
 
-    if piece.armour > 0 then SetPedArmour(cache.ped, math.max(GetPedArmour(cache.ped) - piece.armour, 0)) end
+    -- exactly what this piece added, never the nominal value (see wear above)
+    local applied = tonumber(piece.applied) or 0
+    if applied > 0 then SetPedArmour(cache.ped, math.max(GetPedArmour(cache.ped) - applied, 0)) end
     if slot.kind == 'prop' then
         ClearPedProp(cache.ped, slot.index)
         if piece.original then SetPedPropIndex(cache.ped, slot.index, piece.original.drawable, piece.original.texture, true) end
