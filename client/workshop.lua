@@ -76,6 +76,15 @@ local function serverCall(name, ...)
     return res
 end
 
+---serverCall keeps only the first return value; a write callback answers
+---ok, reason and the panel shows the reason, so that pair needs its own helper.
+---@return any ok, any reason
+local function serverCallPair(name, ...)
+    local ran, ok, reason = pcall(lib.callback.await, name, false, ...)
+    if not ran then return nil, nil end
+    return ok, reason
+end
+
 local colourChoiceCache
 local function colourChoices()
     if colourChoiceCache then return colourChoiceCache end
@@ -425,6 +434,185 @@ RegisterNetEvent('vehiclemods:client:clearCustomLivery', function(netId)
     ActiveCustomLiveries[key] = nil
 end)
 
+-- ── sirens (Task 6b) ──────────────────────────────────────────────────────────
+-- dps-fleet owns which tones a model is allowed; LVC (lvc, GPL-3) owns the sound.
+-- The cache below is the whole assignment table, filled once at resource start
+-- and patched by the server's broadcast. LVC's credited hook reads it through the
+-- GetSirenAssignments export and merges it over its own SIRENS.lua table, so this
+-- cache matters to every player, not only to the ones who may use the workshop.
+
+local SIREN_CACHE = {}
+-- model (lowercase) -> vehicles.meta game name, from the server's open payload.
+local SIREN_GAMES = {}
+-- LVC reads position 1 as the airhorn and 2.. as the cycle, so never fewer than two.
+local SIREN_SLOT_MIN = 2
+local sirenTestSound = nil
+
+---LVC's hook and anything else client-side reads the assignments here.
+exports('GetSirenAssignments', function() return SIREN_CACHE end)
+
+---client.lua hands the registry game names over when the panel data arrives.
+---@param games table|nil model (lowercase) -> game name
+function WorkshopClient.setGames(games)
+    if type(games) ~= 'table' then return end
+    SIREN_GAMES = games
+end
+
+---@param assignments any siren key -> tone id list
+---@return number keys accepted
+local function cacheSirens(assignments)
+    if type(assignments) ~= 'table' then return 0 end
+    local n = 0
+    for key, tones in pairs(assignments) do
+        if type(key) == 'string' and Workshop.validTones(tones, #Workshop.SIREN_TONES) then
+            SIREN_CACHE[key] = tones
+            n = n + 1
+        end
+    end
+    return n
+end
+
+RegisterNetEvent('dps-fleet:client:sirens', function(assignment)
+    if type(assignment) ~= 'table' or type(assignment.key) ~= 'string' then return end
+    if not Workshop.validTones(assignment.tones, #Workshop.SIREN_TONES) then return end
+    SIREN_CACHE[assignment.key] = assignment.tones
+end)
+
+local function fillSirenCache()
+    return cacheSirens(serverCall('dps-fleet:server:allSirens'))
+end
+
+-- One shot at resource start, never a loop: LVC asks for this table the moment a
+-- player enters a siren vehicle. SetTimeout gives the await its own thread and
+-- lets the server finish loading first; a client that joins mid-boot and gets
+-- nothing is given one retry, then LVC simply keeps its own SIRENS.lua list.
+AddEventHandler('onClientResourceStart', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
+    SetTimeout(2000, function()
+        if fillSirenCache() == 0 then SetTimeout(15000, fillSirenCache) end
+    end)
+end)
+
+---The name LVC looks the assignment up by: GetDisplayNameFromVehicleModel on the
+---live vehicle, case intact (modelOf lowercases it, which would miss the key).
+---GTA keeps 11 characters of a game name, so this is already short.
+---@param veh number
+---@return string|nil
+local function gameNameOf(veh)
+    local name = GetDisplayNameFromVehicleModel(GetEntityModel(veh))
+    if type(name) ~= 'string' or name == '' or name == 'CARNOTFOUND' then return nil end
+    return name
+end
+
+---@param pos number
+---@return string
+local function sirenSlotLabel(pos)
+    return pos == 1 and 'Airhorn' or ('Tone %d'):format(pos - 1)
+end
+
+-- Built once. The tone name alone is ambiguous (three packs ship a "Fire Wail"),
+-- so the id LVC knows the tone by leads the label.
+local sirenToneChoiceCache
+local function sirenToneChoices()
+    if sirenToneChoiceCache then return sirenToneChoiceCache end
+    sirenToneChoiceCache = {}
+    for id = 1, #Workshop.SIREN_TONES do
+        sirenToneChoiceCache[id] = { value = id, label = ('%d · %s'):format(id, Workshop.SIREN_TONES[id]) }
+    end
+    return sirenToneChoiceCache
+end
+
+local sirenPresetChoiceCache
+local function sirenPresetChoices()
+    if sirenPresetChoiceCache then return sirenPresetChoiceCache end
+    sirenPresetChoiceCache = {}
+    for _, presetKey in ipairs(Workshop.SIREN_PRESET_ORDER) do
+        local preset = Workshop.SIREN_PRESETS[presetKey]
+        sirenPresetChoiceCache[#sirenPresetChoiceCache + 1] = {
+            value = presetKey, label = ('%s — %d tones'):format(preset.label, #preset.tones),
+        }
+    end
+    sirenPresetChoiceCache[#sirenPresetChoiceCache + 1] = { value = 'custom', label = 'Custom — the tones below' }
+    return sirenPresetChoiceCache
+end
+
+---What the sheet and every apply work from. The server is the authority on both
+---the key and the saved list; the cache answers if the call fails, and the LEO set
+---is the starting point when nothing has ever been saved for this vehicle.
+---@param model string lowercase model name
+---@param gameName string|nil what the live vehicle calls itself
+---@return table state { key, tones (a copy, safe to edit), saved, preset }
+local function sirenState(model, gameName)
+    local reply = serverCall('dps-fleet:server:sirens', model, gameName)
+    local key = (type(reply) == 'table' and type(reply.key) == 'string' and reply.key)
+        or Workshop.sirenKey(gameName or SIREN_GAMES[model], model)
+    local tones
+    if type(reply) == 'table' and Workshop.validTones(reply.tones, #Workshop.SIREN_TONES) then
+        tones = reply.tones
+        if key then SIREN_CACHE[key] = tones end
+    elseif key and Workshop.validTones(SIREN_CACHE[key], #Workshop.SIREN_TONES) then
+        tones = SIREN_CACHE[key]
+    end
+    local saved = tones ~= nil
+    if not tones then tones = Workshop.SIREN_PRESETS.leo.tones end
+    local copy = {}
+    for i, id in ipairs(tones) do copy[i] = id end
+    return { key = key or nil, tones = copy, saved = saved, preset = Workshop.sirenPresetOf(copy) }
+end
+
+---Two seconds of one tone, so a set can be heard before it is saved. One-shot
+---timer, no loop; a second press stops the first sound.
+---@param veh number
+---@param id number
+---@return boolean
+local function playTone(veh, id)
+    local audio = Workshop.SIREN_TONES_STRING[id]
+    if not audio then return false end
+    if sirenTestSound then
+        StopSound(sirenTestSound)
+        ReleaseSoundId(sirenTestSound)
+        sirenTestSound = nil
+    end
+    local soundId = GetSoundId()
+    sirenTestSound = soundId
+    PlaySoundFromEntity(soundId, audio, veh, Workshop.SIREN_TONES_REF[id] or 0, false, 0)
+    SetTimeout(2000, function()
+        StopSound(soundId)
+        ReleaseSoundId(soundId)
+        if sirenTestSound == soundId then sirenTestSound = nil end
+    end)
+    return true
+end
+
+-- The sheet; SHEETS.sirens below points at it.
+local function sheetSirens(veh)
+    local model = modelOf(veh)
+    local state = sirenState(model, gameNameOf(veh))
+    if not state.key then
+        return { { key = 'nokey', kind = 'action', value = false,
+            label = 'This vehicle has no game name, so LVC has nothing to key siren tones to.' } }
+    end
+
+    local options = {}
+    if not state.saved then
+        options[#options + 1] = { key = 'unsaved', kind = 'action', value = false,
+            label = 'No tones saved for this vehicle yet — LVC is using its own list. What follows is a starting point.' }
+    end
+    options[#options + 1] = { key = 'preset', label = ('Siren set for %s'):format(state.key), kind = 'pick',
+        value = state.preset or 'custom', choices = sirenPresetChoices() }
+    for pos, id in ipairs(state.tones) do
+        options[#options + 1] = { key = 'slot:' .. pos, label = sirenSlotLabel(pos), kind = 'pick',
+            value = id, choices = sirenToneChoices() }
+        options[#options + 1] = { key = 'test:' .. pos, kind = 'action', value = true,
+            label = ('Play %s — %s'):format(sirenSlotLabel(pos), Workshop.SIREN_TONES[id] or ('tone ' .. id)) }
+    end
+    options[#options + 1] = { key = 'add_slot', label = 'Add a tone', kind = 'action',
+        value = #state.tones < Workshop.SIREN_SLOT_MAX }
+    options[#options + 1] = { key = 'remove_slot', label = 'Remove the last tone', kind = 'action',
+        value = #state.tones > SIREN_SLOT_MIN }
+    return options
+end
+
 -- ── sheet builders ────────────────────────────────────────────────────────────
 -- Each returns the options array for its section, read live off the vehicle.
 
@@ -668,7 +856,6 @@ local function sheetRepair()
     }
 end
 
--- 'sirens' is deliberately absent: Task 6b builds it, and an unknown id yields nil.
 local SHEETS = {
     liveries = sheetLiveries,
     customliveries = sheetCustomLiveries,
@@ -682,6 +869,7 @@ local SHEETS = {
     windows = sheetWindows,
     seats = sheetSeats,
     presets = sheetPresets,
+    sirens = sheetSirens,
     repair = sheetRepair,
 }
 
@@ -974,6 +1162,74 @@ function APPLY.presets(veh, key, value)
 
     if key == 'unavailable' then return false, 'Presets are not available yet.' end
     return false, 'Unknown preset option.'
+end
+
+function APPLY.sirens(veh, key, value)
+    if key == 'nokey' or key == 'unsaved' then return false, 'Nothing to change here.' end
+
+    local model = modelOf(veh)
+    local gameName = gameNameOf(veh)
+    local state = sirenState(model, gameName)
+    if not state.key then return false, 'This vehicle has no game name to key siren tones to.' end
+
+    -- Every change writes the whole list: the row is the assignment, not a diff.
+    local function save(list, message)
+        if not Workshop.validTones(list, #Workshop.SIREN_TONES) then return false, 'That tone list is not valid.' end
+        local ok, why = serverCallPair('dps-fleet:server:setSirens', model, list, gameName)
+        if ok ~= true then return false, type(why) == 'string' and why or 'Could not save those tones.' end
+        -- The server broadcast reaches us too, but the panel rebuilds the sheet the
+        -- moment this returns, so the cache is set here as well.
+        SIREN_CACHE[state.key] = list
+        return true, message
+    end
+
+    if key == 'preset' then
+        if value == 'custom' then return false, 'Pick a set, or change the tones below.' end
+        local preset = type(value) == 'string' and Workshop.SIREN_PRESETS[value] or nil
+        if not preset then return false, 'Pick a siren set.' end
+        local list = {}
+        for i, id in ipairs(preset.tones) do list[i] = id end
+        return save(list, ('%s tones saved for %s.'):format(preset.label, state.key))
+    end
+
+    local slot = tonumber(key:match('^slot:(%d+)$'))
+    if slot then
+        if not state.tones[slot] then return false, 'That slot is gone — reopen the sheet.' end
+        local id = tonumber(value)
+        id = id and math.floor(id) or nil
+        if not id or not Workshop.SIREN_TONES[id] then return false, 'Pick a tone.' end
+        local list = state.tones
+        list[slot] = id
+        return save(list, ('%s set to %s.'):format(sirenSlotLabel(slot), Workshop.SIREN_TONES[id]))
+    end
+
+    local testSlot = tonumber(key:match('^test:(%d+)$'))
+    if testSlot then
+        local id = state.tones[testSlot]
+        if not id then return false, 'There is nothing in that slot.' end
+        if not playTone(veh, id) then return false, 'That tone has no sound to play.' end
+        return true, ('Playing %s for two seconds.'):format(Workshop.SIREN_TONES[id] or ('tone ' .. id))
+    end
+
+    if key == 'add_slot' then
+        local list = state.tones
+        if #list >= Workshop.SIREN_SLOT_MAX then
+            return false, ('LVC takes at most %d tones.'):format(Workshop.SIREN_SLOT_MAX)
+        end
+        -- Starts as a copy of the last tone: something valid to save, and obviously
+        -- the one to change next.
+        list[#list + 1] = list[#list]
+        return save(list, 'Tone added — pick what it should be.')
+    end
+
+    if key == 'remove_slot' then
+        local list = state.tones
+        if #list <= SIREN_SLOT_MIN then return false, 'A siren keeps the airhorn and at least one tone.' end
+        list[#list] = nil
+        return save(list, 'Last tone removed.')
+    end
+
+    return false, 'Unknown siren option.'
 end
 
 function APPLY.repair(veh, key)

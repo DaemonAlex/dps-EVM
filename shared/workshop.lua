@@ -564,3 +564,152 @@ function Workshop.liveryChoices(count, modCount, names)
     end
     return out
 end
+
+-----------------------------------------------------------------------
+-- Sirens (Task 6b, DPS 2026-09-27)
+--
+-- LVC (lvc, GPL-3, by Lt.Caine / TrevorBarns) owns siren playback and the tone
+-- table itself. dps-fleet owns only *which* tones a model is allowed: the
+-- workshop writes a tone-id list per siren key and LVC reads it through a hook.
+--
+-- The three columns below are a transcription of lvc/SIRENS.lua as installed on
+-- 2026-09-27 (46 tones: base game 1-14, then Code3 RLS, Whelen Gamma 2,
+-- Fire/EMS, Federal Signal PA4000, Powercall DX5, Cencom Sapphire and Federal
+-- Signal Smart Siren). No LVC code is copied — these are ids, names and audio
+-- names only. THE IDS ARE THE CONTRACT: add or remove a siren pack in LVC and
+-- this table (and tests/test_workshop.lua) must be re-transcribed in the same
+-- change, or the workshop will hand LVC an id that now means another tone.
+-----------------------------------------------------------------------
+
+-- { tone name, PlaySoundFromEntity audioName, audioRef soundset (0 = base game) }
+local SIREN_TONE_DATA = {
+    { 'Airhorn', 'SIRENS_AIRHORN', 0 },
+    { 'Wail', 'VEHICLES_HORNS_SIREN_1', 0 },
+    { 'Yelp', 'VEHICLES_HORNS_SIREN_2', 0 },
+    { 'Priority', 'VEHICLES_HORNS_POLICE_WARNING', 0 },
+    { 'CustomA', 'RESIDENT_VEHICLES_SIREN_WAIL_01', 0 },
+    { 'CustomB', 'RESIDENT_VEHICLES_SIREN_WAIL_02', 0 },
+    { 'CustomC', 'RESIDENT_VEHICLES_SIREN_WAIL_03', 0 },
+    { 'CustomD', 'RESIDENT_VEHICLES_SIREN_QUICK_01', 0 },
+    { 'CustomE', 'RESIDENT_VEHICLES_SIREN_QUICK_02', 0 },
+    { 'CustomF', 'RESIDENT_VEHICLES_SIREN_QUICK_03', 0 },
+    { 'Powercall', 'VEHICLES_HORNS_AMBULANCE_WARNING', 0 },
+    { 'Fire Horn', 'VEHICLES_HORNS_FIRETRUCK_WARNING', 0 },
+    { 'Fire Yelp', 'RESIDENT_VEHICLES_SIREN_FIRETRUCK_WAIL_01', 0 },
+    { 'Fire Wail', 'RESIDENT_VEHICLES_SIREN_FIRETRUCK_QUICK_01', 0 },
+    { 'RLS Airhorn', 'RLS_AIRHORN', 'CODE3RLS_SOUNDSET' },
+    { 'RLS Wail', 'RLS_WAIL', 'CODE3RLS_SOUNDSET' },
+    { 'RLS Yelp', 'RLS_YELP', 'CODE3RLS_SOUNDSET' },
+    { 'RLS Warning', 'RLS_WARNING', 'CODE3RLS_SOUNDSET' },
+    { 'Whelen Horn', 'GAMMA_AIRHORN', 'WHELENGAMMA2_SOUNDSET' },
+    { 'Whelen Wail', 'GAMMA_WAIL', 'WHELENGAMMA2_SOUNDSET' },
+    { 'Whelen Yelp', 'GAMMA_YELP', 'WHELENGAMMA2_SOUNDSET' },
+    { 'Whelen Warn', 'GAMMA_WARN', 'WHELENGAMMA2_SOUNDSET' },
+    { 'Whelen Riot', 'GAMMA_RIOT', 'WHELENGAMMA2_SOUNDSET' },
+    { 'Fire Horn (FireEMS)', 'FIRE_HORN', 'FIREEMS_SOUNDSET' },
+    { 'Fire Wail (FireEMS)', 'FIRE_WAIL', 'FIREEMS_SOUNDSET' },
+    { 'Fire Yelp (FireEMS)', 'FIRE_YELP', 'FIREEMS_SOUNDSET' },
+    { 'Fire Warning (FireEMS)', 'FIRE_POWERCALL', 'FIREEMS_SOUNDSET' },
+    { 'PA Horn', 'PA_AIRHORN', 'FEDSIGPA4000_SOUNDSET' },
+    { 'PA Wail', 'PA_WAIL', 'FEDSIGPA4000_SOUNDSET' },
+    { 'PA Yelp', 'PA_YELP', 'FEDSIGPA4000_SOUNDSET' },
+    { 'PA Warning', 'PA_WARNING', 'FEDSIGPA4000_SOUNDSET' },
+    { 'DX5 Horn', 'DX5HORN', 'DX5_SOUNDSET' },
+    { 'DX5 Wail', 'DX5WAIL', 'DX5_SOUNDSET' },
+    { 'DX5 Yelp', 'DX5YELP', 'DX5_SOUNDSET' },
+    { 'DX5 Intersection', 'DX5INTER', 'DX5_SOUNDSET' },
+    { 'DX5 HiLo', 'DX5HILO', 'DX5_SOUNDSET' },
+    { 'DX5 Powercall', 'DX5PCALLP', 'DX5_SOUNDSET' },
+    { 'Sapphire Horn', 'SAPP_HORN', 'CENCOMSAPPHIRE_SOUNDSET' },
+    { 'Sapphire Wail', 'SAPP_WAIL', 'CENCOMSAPPHIRE_SOUNDSET' },
+    { 'Sapphire Yelp', 'SAPP_YELP', 'CENCOMSAPPHIRE_SOUNDSET' },
+    { 'Sapphire Warning', 'SAPP_PIER', 'CENCOMSAPPHIRE_SOUNDSET' },
+    { 'Smart Siren Horn', 'SSHORN', 'SMARTSIREN_SOUNDSET' },
+    { 'Smart Siren Wail', 'SSWAIL', 'SMARTSIREN_SOUNDSET' },
+    { 'Smart Siren Yelp', 'SSYELP', 'SMARTSIREN_SOUNDSET' },
+    { 'Smart Siren Prty', 'SSPRTY', 'SMARTSIREN_SOUNDSET' },
+    { 'Smart Siren HiLo', 'SSHILO', 'SMARTSIREN_SOUNDSET' },
+}
+
+-- Three views of the one transcription above, so the columns can never drift apart.
+-- SIREN_TONES is the id -> name list the menus read; SIREN_TONES_STRING and
+-- SIREN_TONES_REF are what the workshop's "play this tone" button needs.
+Workshop.SIREN_TONES, Workshop.SIREN_TONES_STRING, Workshop.SIREN_TONES_REF = {}, {}, {}
+for id, row in ipairs(SIREN_TONE_DATA) do
+    Workshop.SIREN_TONES[id] = row[1]
+    Workshop.SIREN_TONES_STRING[id] = row[2]
+    Workshop.SIREN_TONES_REF[id] = row[3]
+end
+
+-- LVC reads position 1 as the airhorn and positions 2..n as the siren cycle, so a
+-- list is at most 8 long (LVC's own menu pages 8 tones) and slot 1 is the horn.
+Workshop.SIREN_SLOT_MAX = 8
+
+-- Starting points, one per installed siren pack, horn first. leo/fire/ems are the
+-- three sets already live in lvc/SIRENS.lua's SIREN_ASSIGNMENTS on 2026-09-27.
+Workshop.SIREN_PRESETS = {
+    leo = { label = 'LEO (Whelen)', tones = { 19, 20, 21, 22, 23 } },
+    fire = { label = 'Fire', tones = { 12, 14, 13, 11 } },
+    ems = { label = 'EMS', tones = { 1, 11, 2, 3 } },
+    rls = { label = 'RLS', tones = { 15, 16, 17, 18 } },
+    pa = { label = 'PA', tones = { 28, 29, 30, 31 } },
+    dx5 = { label = 'DX5', tones = { 32, 33, 34, 35, 36, 37 } },
+    sapphire = { label = 'Sapphire', tones = { 38, 39, 40, 41 } },
+    smart = { label = 'Smart Siren', tones = { 42, 43, 44, 45, 46 } },
+}
+
+-- Menu order; the presets table is a map, so the order lives here.
+Workshop.SIREN_PRESET_ORDER = { 'leo', 'fire', 'ems', 'rls', 'pa', 'dx5', 'sapphire', 'smart' }
+
+---The SIREN_ASSIGNMENTS key for a model: the vehicles.meta game name when the
+---registry knows it, else the spawn name, cut to the 11 characters GTA keeps
+---(LVC shortens oversized keys the same way). Case is kept: the keys are
+---matched against GetDisplayNameFromVehicleModel, which is case-sensitive.
+---@param gameName string|nil
+---@param model string|nil
+---@return string|nil
+function Workshop.sirenKey(gameName, model)
+    local name = gameName
+    if type(name) ~= 'string' or name == '' then name = model end
+    if type(name) ~= 'string' or name == '' then return nil end
+    return name:sub(1, 11)
+end
+
+---A tone list LVC can use: a plain 1..n array, 1 to Workshop.SIREN_SLOT_MAX long,
+---every entry a whole number in 1..maxId. Position 1 is the airhorn slot.
+---@param list any
+---@param maxId number|nil defaults to the transcribed tone count
+---@return boolean
+function Workshop.validTones(list, maxId)
+    if type(list) ~= 'table' then return false end
+    maxId = tonumber(maxId) or #Workshop.SIREN_TONES
+    local n = #list
+    if n < 1 or n > Workshop.SIREN_SLOT_MAX then return false end
+    local keys = 0
+    for _ in pairs(list) do keys = keys + 1 end
+    if keys ~= n then return false end -- a hole or a named key: not a list
+    for i = 1, n do
+        local id = list[i]
+        if type(id) ~= 'number' or id ~= math.floor(id) or id < 1 or id > maxId then return false end
+    end
+    return true
+end
+
+---Which preset a saved tone list is, or nil when it was hand-built. Same ids in
+---the same order is the only match: LVC plays them in list order.
+---@param list any
+---@return string|nil preset key
+function Workshop.sirenPresetOf(list)
+    if type(list) ~= 'table' then return nil end
+    for _, key in ipairs(Workshop.SIREN_PRESET_ORDER) do
+        local tones = Workshop.SIREN_PRESETS[key].tones
+        if #tones == #list then
+            local same = true
+            for i = 1, #tones do
+                if tones[i] ~= list[i] then same = false; break end
+            end
+            if same then return key end
+        end
+    end
+    return nil
+end

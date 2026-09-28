@@ -9,6 +9,9 @@
 ]]
 
 local PACKS, CLASSES, EMERGENCY = {}, {}, {}
+-- model (lowercase) -> vehicles.meta game name. LVC keys siren assignments on the
+-- game name, not the spawn name, so the workshop needs the pair (Task 6b).
+local GAMES = {}
 local PHOTOS = nil -- model -> url, filled on first open from jg-vehiclestudio
 
 local function readJson(path)
@@ -29,6 +32,7 @@ CreateThread(function()
             if type(v) == 'table' then
                 PACKS[model:lower()] = v.res or 'vanilla'
                 if v.class then CLASSES[model:lower()] = tostring(v.class):gsub('^%l', string.upper) end
+                if type(v.game) == 'string' and v.game ~= '' then GAMES[model:lower()] = v.game end
                 n = n + 1
             end
         end
@@ -116,7 +120,7 @@ end)
 lib.callback.register('dps-fleet:server:open', function(source, alreadyHasData)
     if not allowed(source) then return false end
     if alreadyHasData then return true end
-    return true, { packs = PACKS, classes = CLASSES, emergency = EMERGENCY, photos = loadPhotos() }
+    return true, { packs = PACKS, classes = CLASSES, emergency = EMERGENCY, games = GAMES, photos = loadPhotos() }
 end)
 
 local function registryHas(model)
@@ -442,8 +446,23 @@ local WORKSHOP_TABLES = {
             UNIQUE KEY unique_memory (identifier, vehicle_model)
         )
     ]],
+    -- Task 6b: which LVC tones a siren key is allowed. Keyed on the siren key
+    -- (the game name cut to the 11 characters GTA keeps), not the spawn name, so
+    -- every spawn code sharing one yft shares one row — the way LVC reads it.
+    fleet_siren_assignments = [[
+        CREATE TABLE IF NOT EXISTS fleet_siren_assignments (
+            -- utf8mb4_bin: siren keys are case-sensitive in LVC, and the default
+            -- collation would make FIRETRUK and firetruk the same primary key.
+            siren_key VARCHAR(11) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            model VARCHAR(64),
+            tones JSON NOT NULL,
+            updated_by VARCHAR(64),
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (siren_key)
+        )
+    ]],
 }
-local WORKSHOP_TABLE_ORDER = { 'custom_liveries', 'vehicle_mods', 'vehicle_presets', 'player_livery_memory' }
+local WORKSHOP_TABLE_ORDER = { 'custom_liveries', 'vehicle_mods', 'vehicle_presets', 'player_livery_memory', 'fleet_siren_assignments' }
 
 local function ensureTables()
     local made, failed = {}, {}
@@ -498,12 +517,149 @@ local function loadCustomLiveries()
     lib.print.info(('custom liveries: %d from config, %d from the database'):format(seeded, loaded))
 end
 
+-----------------------------------------------------------------------
+-- sirens (Task 6b)
+--
+-- dps-fleet owns the assignment, LVC owns the sound. The workshop writes a tone
+-- list per siren key; the whole table is cached here, handed to every client at
+-- their resource start and patched by a broadcast on every write, and LVC's
+-- credited hook (lvc/UTIL/cl_utils.lua) merges it over its own SIRENS.lua table.
+-----------------------------------------------------------------------
+
+-- siren key -> tone id list, the live cache. Filled at start, patched on write.
+local SIREN_BY_KEY = {}
+-- The copy handed out to callbacks and the export, so nothing outside can edit
+-- the cache. Rebuilt on the first read after a change, never per call.
+local sirenSnapshot = nil
+
+---@return table<string, number[]>
+local function sirenAssignments()
+    if sirenSnapshot then return sirenSnapshot end
+    local out = {}
+    for key, tones in pairs(SIREN_BY_KEY) do
+        local copy = {}
+        for i, id in ipairs(tones) do copy[i] = id end
+        out[key] = copy
+    end
+    sirenSnapshot = out
+    return out
+end
+
+local function loadSirenAssignments()
+    local ok, rows = db('loadSirenAssignments', MySQL.query.await,
+        'SELECT siren_key, tones FROM fleet_siren_assignments')
+    if not ok then
+        lib.print.warn('siren assignments: database unavailable; LVC keeps its SIRENS.lua table')
+        return
+    end
+    local loaded, rejected = 0, 0
+    for _, row in ipairs(rows or {}) do
+        local tones = decodeJson(row.tones)
+        if type(row.siren_key) == 'string' and Workshop.validTones(tones, #Workshop.SIREN_TONES) then
+            SIREN_BY_KEY[row.siren_key] = tones
+            loaded = loaded + 1
+        else
+            rejected = rejected + 1
+        end
+    end
+    sirenSnapshot = nil
+    lib.print.info(('siren assignments: %d keys loaded, %d rows rejected (of %d tones)'):format(
+        loaded, rejected, #Workshop.SIREN_TONES))
+end
+
+---A game name as read off a live vehicle. GTA keeps 11 characters of it, so the
+---client can only ever send a short, plain token; anything else is refused.
+---@param name any
+---@return string|nil
+local function validGameName(name)
+    if type(name) ~= 'string' then return nil end
+    if #name < 1 or #name > 64 then return nil end
+    if not name:match('^[%w_%-%.]+$') then return nil end
+    return name
+end
+
+---The siren key for a model. GetDisplayNameFromVehicleModel is what LVC looks the
+---assignment up by, so the name the client read off the live vehicle wins; the
+---registry game name from data/fleet_state.json answers when there is none (that
+---file is keyed on the spawn name and does not cover every model), and the spawn
+---name itself is the last resort.
+---@param model string lowercased model name
+---@param gameName any what the client read off the vehicle, unvalidated
+---@return string|nil
+local function sirenKeyFor(model, gameName)
+    return Workshop.sirenKey(validGameName(gameName) or GAMES[model], model)
+end
+
+-- The sheet asks for one model: its key, what is saved for it and which preset
+-- that is. nil tones mean nothing is saved and LVC still uses SIRENS.lua.
+lib.callback.register('dps-fleet:server:sirens', function(source, modelName, gameName)
+    if not canWorkshop(source) then return false end
+    local model = validModel(modelName)
+    if not model then return false end
+    local key = sirenKeyFor(model, gameName)
+    if not key then return false end
+    local tones = sirenAssignments()[key]
+    return { key = key, model = model, tones = tones, preset = tones and Workshop.sirenPresetOf(tones) or nil }
+end)
+
+-- Every client caches the whole table for LVC, so this one is not workshop-gated:
+-- a player with no workshop access still drives vehicles whose tones were set.
+lib.callback.register('dps-fleet:server:allSirens', function()
+    return sirenAssignments()
+end)
+
+lib.callback.register('dps-fleet:server:setSirens', function(source, modelName, tones, gameName)
+    local src = source
+    if not canWorkshop(src) then return false, 'You may not change siren tones.' end
+    local model = validModel(modelName)
+    if not model then return false, 'That vehicle model is not valid.' end
+    if not Workshop.validTones(tones, #Workshop.SIREN_TONES) then
+        return false, ('Siren tones must be 1 to %d whole numbers between 1 and %d.'):format(
+            Workshop.SIREN_SLOT_MAX, #Workshop.SIREN_TONES)
+    end
+    local key = sirenKeyFor(model, gameName)
+    if not key then return false, 'That vehicle has no siren key.' end
+    local citizenid = citizenidOf(src)
+
+    -- Never store the client's table: rebuild it as plain integers.
+    local list = {}
+    for i, id in ipairs(tones) do list[i] = math.floor(id) end
+    local encoded = json.encode(list)
+
+    -- underLock owns the pcall and the per-player lock, so the result comes back
+    -- through this flag; the panel shows the message, db() logs the reason.
+    local saved = false
+    underLock(src, 'setSirens', function()
+        local ok = db('setSirens', MySQL.insert.await, [[
+            INSERT INTO fleet_siren_assignments (siren_key, model, tones, updated_by)
+            VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE tones = VALUES(tones), model = VALUES(model), updated_by = VALUES(updated_by)
+        ]], { key, model, encoded, citizenid })
+        if not ok then return end
+        SIREN_BY_KEY[key] = list
+        sirenSnapshot = nil
+        TriggerClientEvent('dps-fleet:client:sirens', -1, { key = key, tones = list })
+        saved = true
+        lib.print.info(('siren tones for %s (key %s) set to %s by %s (src %s)'):format(
+            model, key, table.concat(list, ','), citizenid or 'unknown', src))
+    end)
+    if not saved then return false, 'Could not save those tones right now.' end
+    return true
+end)
+
+---Server-side reader for other resources (dispatch, MDT, a future fleet report).
+---Returns a copy: the cache is ours.
+exports('GetSirenAssignments', function() return sirenAssignments() end)
+
 CreateThread(function()
     while GetResourceState('qbx_core') ~= 'started' do Wait(200) end
     deriveWorkshopJobs()
     grantAces()
     MySQL.ready.await() -- the resource being started is not enough: this waits for the connection too
-    if ensureTables() then loadCustomLiveries() end
+    if ensureTables() then
+        loadCustomLiveries()
+        loadSirenAssignments()
+    end
 end)
 
 -----------------------------------------------------------------------

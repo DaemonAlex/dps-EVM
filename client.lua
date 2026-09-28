@@ -171,6 +171,8 @@ local function openPanel(mode)
     if data then serverData = data end
     if not serverData then serverData = {} end
     buildRows(serverData)
+    -- The sirens sheet keys tones on the vehicles.meta game name, not the spawn name.
+    WorkshopClient.setGames(serverData.games)
     if #ALL == 0 then
         notify('The vehicle registry is empty; nothing to show.', 'error')
         return
@@ -326,7 +328,8 @@ local function sectionAllowed(id)
     return false
 end
 
-local NOT_WIRED = { sirens = 'Siren tones are not wired up yet.' }
+-- Every section has a sheet now; this stays for the next one that lands ahead of its sheet.
+local NOT_WIRED = {}
 
 ---The colour swatches, keyed by string so the index-0 entry survives the trip to
 ---the NUI (a 0-based Lua table is not an array and must not become one).
