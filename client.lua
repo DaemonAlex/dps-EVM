@@ -157,6 +157,8 @@ local function closePanel()
     isOpen = false
     SetNuiFocus(false, false)
     SendNUIMessage({ action = 'close' })
+    -- A stale ox_target vehicle must never outrank cache.vehicle on the next open.
+    WorkshopClient.clearVehicle()
 end
 
 local function openPanel(mode)
@@ -194,6 +196,12 @@ local function openPanel(mode)
         mode = startMode,
     })
 end
+
+-- client/target.lua (Task 8) opens the panel straight to the workshop from
+-- ox_target; openPanel/closePanel are local to this file, so this is the export.
+FleetPanel = FleetPanel or {}
+FleetPanel.open = openPanel
+FleetPanel.close = closePanel
 
 local function toggle(mode)
     if isOpen then closePanel() else openPanel(mode) end

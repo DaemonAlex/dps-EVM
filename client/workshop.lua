@@ -175,6 +175,45 @@ local function SaveLiveryToMemory(veh)
     TriggerServerEvent('vehiclemods:server:saveLiveryMemory', model, liveryIndex, liveryMod, customLivery, extras)
 end
 
+---Applies a saved livery-memory row to a vehicle (legacy 3234-3280, the restore
+---half of applyLiveryMemory). `mem` is what `dps-fleet:server:liveryMemory`
+---returns: { liveryIndex, liveryMod, customLivery, extras }. `extras` normally
+---arrives already decoded (the callback does that), but a JSON string is handled
+---too since this is the one place that row is read.
+---@param veh number
+---@param mem table
+local function ApplyLiveryMemory(veh, mem)
+    if not veh or veh == 0 or not DoesEntityExist(veh) or type(mem) ~= 'table' then return end
+
+    SetVehicleModKit(veh, 0)
+
+    local liveryIndex = tonumber(mem.liveryIndex)
+    if liveryIndex and liveryIndex >= 0 then SetVehicleLivery(veh, liveryIndex) end
+
+    local liveryMod = tonumber(mem.liveryMod)
+    if liveryMod and liveryMod >= 0 then SetVehicleMod(veh, 48, liveryMod, false) end
+
+    if mem.customLivery then
+        TriggerEvent('vehiclemods:client:setCustomLivery', NetworkGetNetworkIdFromEntity(veh), modelOf(veh), mem.customLivery)
+    end
+
+    local extras = mem.extras
+    if type(extras) == 'string' then
+        local ok, decoded = pcall(json.decode, extras)
+        if ok and type(decoded) == 'table' then extras = decoded end
+    end
+    if type(extras) == 'table' then
+        for i, state in pairs(extras) do
+            local id = tonumber(i)
+            if id and DoesExtraExist(veh, id) then SetVehicleExtra(veh, id, not state) end
+        end
+    end
+
+    if Config.AutoApplyLivery and Config.AutoApplyLivery.notifyOnApply then
+        lib.notify({ title = 'Livery Applied', description = 'Previous configuration restored', type = 'success', duration = 2500 })
+    end
+end
+
 -- ── vehicle properties (legacy 2148-2242, field names unchanged) ───────────────
 
 ---@param veh number
@@ -1272,6 +1311,7 @@ end
 WorkshopClient.liveryLabel = GetLiveryLabel
 WorkshopClient.enhancedLiveryName = GetEnhancedLiveryName
 WorkshopClient.saveLiveryToMemory = SaveLiveryToMemory
+WorkshopClient.applyMemory = ApplyLiveryMemory
 
 -- ── the vehicle the panel works on ────────────────────────────────────────────
 -- ox_target (Task 8) sets the vehicle it was used on; the panel prefers it over
