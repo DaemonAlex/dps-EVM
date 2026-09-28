@@ -434,11 +434,14 @@ RegisterNUICallback('ws:apply', function(req, cb)
     if not veh then cb({ ok = false, gone = true, reason = 'That vehicle is gone.' }) return end
 
     local ok, message = WorkshopClient.apply(veh, section, key, value)
-    if ok then Wait(50) end   -- extras and mods report their new state a frame later
     -- an apply may open an ox_lib dialog, which drops NUI focus on the way out
     if isOpen then SetNuiFocus(true, true) end
-    local sheet = DoesEntityExist(veh) and WorkshopClient.sheet(veh, section) or nil
-    cb({ ok = ok, message = message, sheet = sheet })
+    -- extras and mods report their new state a frame later; answer from a timer so
+    -- the callback itself never yields
+    SetTimeout(ok and 50 or 0, function()
+        local sheet = DoesEntityExist(veh) and WorkshopClient.sheet(veh, section) or nil
+        cb({ ok = ok, message = message, sheet = sheet })
+    end)
 end)
 
 -- A logout must leave nothing of the last character behind: the panel closes (so
