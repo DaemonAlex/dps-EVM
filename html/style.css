@@ -12,7 +12,7 @@ code{font:12px var(--mono);color:var(--cd-ink)}
 
 #app{position:fixed;left:50%;top:6vh;transform:translateX(-50%);width:var(--w);z-index:2}
 #bar{position:relative;display:flex;align-items:center;gap:8px;height:50px;padding:0 10px 0 6px;border-radius:14px;
- background:rgba(17,21,34,.72);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:1px solid var(--cd-border);box-shadow:0 20px 60px rgba(0,0,0,.6)}
+ background:rgba(17,21,34,.72);border:1px solid var(--cd-border);box-shadow:0 20px 60px rgba(0,0,0,.6)}
 #bar.focus{border-color:var(--cd-sun);box-shadow:0 0 0 3px rgba(255,122,69,.22),0 20px 60px rgba(0,0,0,.6)}
 #grip{color:var(--cd-grip);padding:0 4px;cursor:grab;font-size:13px}#grip:active{cursor:grabbing}
 .mark{height:26px;width:auto;display:block}
@@ -28,7 +28,7 @@ code{font:12px var(--mono);color:var(--cd-ink)}
 #wgrip:hover:before,#wgrip.on:before{background:var(--cd-sun)}
 
 #panel{margin-top:8px;display:flex;flex-direction:column;max-height:var(--h);min-height:0;border-radius:14px;overflow:hidden;
- background:rgba(17,21,34,.62);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);border:1px solid var(--cd-border);box-shadow:0 20px 60px rgba(0,0,0,.6)}
+ background:rgba(17,21,34,.62);border:1px solid var(--cd-border);box-shadow:0 20px 60px rgba(0,0,0,.6)}
 #panel.hide{display:none}
 .chips{display:flex;flex-wrap:wrap;gap:5px;padding:8px 10px 6px;border-bottom:1px solid var(--cd-border);background:rgba(17,21,34,.35)}
 .chip{font:500 11px/1 Roboto,sans-serif;text-transform:uppercase;letter-spacing:1px;color:var(--cd-dim);background:transparent;border:1.5px solid var(--cd-border);border-radius:999px;padding:5px 9px}
