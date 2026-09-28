@@ -1,29 +1,25 @@
 fx_version 'cerulean'
 game 'gta5'
+lua54 'yes'
 
-name 'DSRP Emergency Vehicle Menu'
-description 'Emergency vehicle modification system with QBox framework integration, job-based access control, and custom livery support. Adapted for DelPerro Sands RP.'
-author 'DaemonAlex (Adapted for DSRP by DelPerro Sands RP)'
-version '2.4.0'
+name 'dps-fleet'
+description 'DPS Fleet: the vehicle browser and the workshop on one panel (Del Perro Sands)'
+author 'DelPerroSands'
+version '3.0.0'
 
 shared_scripts {
     '@ox_lib/init.lua',
-    'config.lua'
+    '@qbx_core/modules/lib.lua',
+    'config.lua',
+    'shared/fields.lua',
+    'shared/groups.lua',
+    'shared/search.lua',
+    'shared/workshop.lua',
 }
+client_scripts { '@qbx_core/modules/playerdata.lua', 'client.lua', 'client/workshop.lua', 'client/repair.lua', 'client/target.lua', 'client/gear.lua' }
+server_scripts { '@oxmysql/lib/MySQL.lua', 'server.lua' }
 
-client_scripts {
-    'client.lua'
-}
+ui_page 'html/index.html'
+files { 'html/index.html', 'html/style.css', 'html/app.js' }
 
-server_scripts {
-    '@oxmysql/lib/MySQL.lua',
-    'server.lua'
-}
-
-dependencies {
-    'ox_lib',
-    'oxmysql',
-    'ox_target'
-}
-
-lua54 'yes'
+dependencies { 'ox_lib', 'qbx_core', 'oxmysql', 'ox_target' }

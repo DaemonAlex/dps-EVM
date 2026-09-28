@@ -1,6 +1,78 @@
 # Changelog
 
-All notable changes to the Emergency Vehicle Menu project will be documented in this file.
+All notable changes to dps-fleet — the merge of dps-carmenu (the vehicle
+browser) and dps-EVM (Emergency Vehicle Menu, the workshop) — are documented
+in this file.
+
+## [3.0.0] - 2026-09-28 - **dps-fleet: the browser and the workshop on one panel**
+
+dps-carmenu and dps-EVM are merged into a single resource, `dps-fleet`, with
+one config, one ace, and one panel. Both resources are benched (not deleted).
+
+### Added
+- **One panel.** Browse (search/spawn/replace/beside/copy card/favorites) and
+  Workshop (every EVM section) live in the same resource, opened by the same
+  `F7` key or the same `ox_target` "Workshop" option.
+- **Trunk gear.** Vehiclegear (Lapertaja, CC BY-NC-SA 4.0; DaemonAlex fork)
+  folds in: department-based kits (bulletproof vest, heavy vest, reflective
+  vest, helmet, turnout coat, fire helmet, medical bag) offered through
+  `ox_target` on any vehicle listed in `data/emergency.json`, gated by job and
+  (unless `CrossDept = true`) by department.
+- **Sirens.** A new Workshop section assigns which tones LVC cycles through on
+  a model — every tone LVC has installed (46 on this server), ready-made
+  presets (LEO/Whelen, Fire, EMS, RLS, PA, DX5, Sapphire, Smart Siren), or a
+  hand-built 2–8 tone list. dps-fleet owns the assignment (its own
+  `fleet_siren_assignments` table, export and event); LVC (GPL-3) owns the
+  sound — the only LVC-side change is a small, credited hook inside LVC's own
+  files that reads the assignment.
+- **Copy card gained a workshop line** — livery, extras, colours, wheels and
+  tint, once a live vehicle is selected.
+- **Drop-in install.** `Config.AutoJobs` derives Workshop access from
+  `qbx_core:GetJobs()` (every `leo`/`ems` job plus `Config.ExtraWorkshopJobs`);
+  `Config.AutoAces` grants the `dps.fleet` ace to `group.admin`/`group.tester`
+  at start if either is missing it; `Config.TrunkGear.AutoVehicles` and
+  `AutoJobs` derive the gear lists the same way. A new department needs no
+  config edit on any of the four.
+- `Config.EnabledModifications.Presets` — the Presets section can now be
+  switched off on its own.
+
+### Changed
+- Commands: `/fleet` (new) and `F7` open Browse; `/carmenu` and `/evm` are
+  kept as aliases (`/evm` opens the Workshop on the current vehicle).
+- The Browse and Workshop database tables (`custom_liveries`, `vehicle_mods`,
+  `vehicle_presets`, `player_livery_memory`) are unchanged; one table is new
+  (`fleet_siren_assignments`).
+
+### Removed
+- `legacy/` (the pre-merge EVM client/server/config copies used during the
+  port) deleted from the branch at cut-over.
+- The standalone Vehiclegear installation (it was never `ensure`d in
+  `server.cfg` on this server) — its functionality now lives inside
+  dps-fleet's trunk gear.
+
+### Fixed
+- The trunk-gear logout hook now clears worn gear on the native Qbox event
+  (`qbx_core:client:playerLoggedOut`) instead of a QBCore-only event that
+  never fires under Qbox.
+- Panel height now follows its content up to the drag height instead of a
+  fixed 62% of the screen, and every layer is translucent over the game (bar
+  `.72`, panel `.62`, headers `.82`, strips `.35`).
+- `chargeRepair` callback now accepts only `full`/`emergency`; field repair
+  reaches it through its own kit-and-cooldown gate instead of a bare charge
+  call.
+- `saveModifications`, `saveLiveryMemory`, and `applyCustomLivery` each run
+  under a per-player-per-handler lock, and custom-livery broadcasts carry a
+  1 s cooldown.
+- Workshop keys are spawn codes resolved from the model hash; the vehicles.meta
+  game name is used only for sirens and livery labels, not as a lookup key.
+- Livery memory now only queries emergency models and re-reads the driver
+  seat before applying.
+- Gear that hands the player an item (`medbag`) always requires that item to
+  already be in the trunk, matching the rest of the gear catalogue.
+- Logout clears the panel's client-side state.
+- The field-repair cooldown is keyed on `citizenid`, not the source id.
+- `RepairCosts.discountJobs`' discount defaults to `0` for an unlisted job
+  instead of falling through unchecked.
 
 ## [2.4.0] - 2026-08-28 - **DPS Job Audit, /evm, On-Foot Fix & Repair Economy**
 

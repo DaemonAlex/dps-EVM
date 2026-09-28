@@ -1,387 +1,417 @@
--- Vehicle Modification System - Multi-Framework Edition
--- Server-side script
+--[[
+    dps-carmenu server  (Qbox native: qbx.spawnVehicle, qbx.getVehiclePlate, lib.callback)
+    Access is the ace `dps.carmenu` (server.cfg grants it to group.admin and group.tester).
+    Every callback re-checks the ace; client arguments are validated before use.
+    Replace mode removes the vehicle the player sits in first (Damon: "remove anything").
 
-if not Config then
-    print("^1ERROR:^0 Config is not loaded! Check fxmanifest.lua.")
-    return
+    data/fleet_state.json  — copy of the fleet state file (registry-refresh.sh drops it in at start)
+    data/emergency.json    — model -> { dept, kind } for the emergency fleet (committed)
+]]
+
+local PACKS, CLASSES, EMERGENCY = {}, {}, {}
+-- model (lowercase) -> vehicles.meta game name. LVC keys siren assignments on the
+-- game name, not the spawn name, so the workshop needs the pair (Task 6b).
+local GAMES = {}
+local PHOTOS = nil -- model -> url, filled on first open from jg-vehiclestudio
+
+local function readJson(path)
+    local raw = LoadResourceFile(GetCurrentResourceName(), path)
+    if not raw then return nil, 'missing' end
+    local ok, data = pcall(json.decode, raw)
+    if not ok or type(data) ~= 'table' then return nil, 'unreadable' end
+    return data
 end
 
--- Framework variables
-local ESX = nil
-local QBCore = nil
-local currentFramework = nil
-local frameworkObject = nil
-
------------------------------------------------------------
--- VERSION CHECKER (v2.1.0+)
--- Checks for updates on resource start via raw.githubusercontent.com
--- Only notifies admins via ACE permissions
------------------------------------------------------------
-local currentVersion = GetResourceMetadata(GetCurrentResourceName(), 'version', 0)
-local githubRepo = "DaemonAlex/dps-EVM"
-local updateAvailable = false
-local latestVersionCached = nil
-
-local function CompareVersions(current, latest)
-    -- Parse semantic versions (handles formats like "2.1.0" or "2.1.0-DSRP")
-    local function parseVersion(v)
-        local major, minor, patch = v:match("^(%d+)%.(%d+)%.(%d+)")
-        return tonumber(major) or 0, tonumber(minor) or 0, tonumber(patch) or 0
-    end
-
-    local curMajor, curMinor, curPatch = parseVersion(current)
-    local latMajor, latMinor, latPatch = parseVersion(latest)
-
-    if latMajor > curMajor then return true end
-    if latMajor == curMajor and latMinor > curMinor then return true end
-    if latMajor == curMajor and latMinor == curMinor and latPatch > curPatch then return true end
-
-    return false
-end
-
-local function CheckVersion()
-    local url = ('https://raw.githubusercontent.com/%s/main/fxmanifest.lua'):format(githubRepo)
-
-    PerformHttpRequest(url, function(status, text, headers)
-        if status ~= 200 then
-            if Config.Debug then
-                print(("^3[VERSION-CHECK]:^0 Failed to check for updates (HTTP %d)"):format(status))
-            end
-            return
-        end
-
-        -- Extract version from fxmanifest.lua content
-        local latestVersion = text:match("version ['\"]([%d%.]+)")
-
-        if not latestVersion then
-            if Config.Debug then
-                print("^3[VERSION-CHECK]:^0 Could not parse version from GitHub")
-            end
-            return
-        end
-
-        latestVersionCached = latestVersion
-
-        if CompareVersions(currentVersion, latestVersion) then
-            updateAvailable = true
-            print("^3╔══════════════════════════════════════════════════════════╗^0")
-            print("^3║^1  [EmergencyVehicleMenu] UPDATE AVAILABLE!               ^3║^0")
-            print(("^3║^0  Current: ^1%s^0 | Latest: ^2%s^0                       ^3║^0"):format(
-                currentVersion:sub(1, 10), latestVersion:sub(1, 10)))
-            print(("^3║^5  https://github.com/%s  ^3║^0"):format(githubRepo))
-            print("^3╚══════════════════════════════════════════════════════════╝^0")
-        else
-            print(("^2[VERSION-CHECK]:^0 EmergencyVehicleMenu v%s is up to date"):format(currentVersion))
-        end
-    end, 'GET')
-end
-
--- Notify admin when they join if update is available
-local function NotifyAdminOfUpdate(playerId)
-    if not updateAvailable then return end
-
-    -- Check if player has admin ACE permission
-    if not IsPlayerAceAllowed(playerId, 'command') then return end
-
-    -- Delay notification slightly so it doesn't get lost in join spam
-    SetTimeout(5000, function()
-        TriggerClientEvent('ox_lib:notify', playerId, {
-            title = 'EmergencyVehicleMenu Update',
-            description = ('v%s available (current: %s)'):format(
-                latestVersionCached or "?.?.?",
-                currentVersion
-            ),
-            type = 'warning',
-            duration = 10000,
-            icon = 'download'
-        })
-    end)
-end
-
--- Check version on resource start (private DSRP fork: disabled by default via
--- Config.CheckUpdates. Kept non-fatal/quiet — only runs when explicitly enabled.)
-AddEventHandler('onResourceStart', function(resourceName)
-    if GetCurrentResourceName() ~= resourceName then return end
-    if Config.CheckUpdates == false then return end
-    CheckVersion()
-end)
-
--- Notify admins when they join
-AddEventHandler('playerJoining', function()
-    local src = source
-    NotifyAdminOfUpdate(src)
-end)
-
--- Initialize framework
 CreateThread(function()
-    Wait(1000) -- Wait for resources to load
-    
-    -- Initialize auto-configuration
-    Config.Initialize()
-    
-    currentFramework = Config.Framework
-    
-    if currentFramework == 'esx' then
-        ESX = exports['es_extended']:getSharedObject()
-        frameworkObject = ESX
-        print("^2INFO:^0 ESX framework initialized on server")
-    elseif currentFramework == 'qbcore' then
-        if GetResourceState('qb-core') == 'started' then
-            QBCore = exports['qb-core']:GetCoreObject()
-        elseif GetResourceState('qbx_core') == 'started' then
-            QBCore = exports['qb-core']:GetCoreObject()
-        end
-        frameworkObject = QBCore
-        print("^2INFO:^0 QBCore framework initialized on server")
-    elseif currentFramework == 'qbox' then
-        -- QBox (pure Qbox): NO GetCoreObject on this build (it throws for both
-        -- qb-core and qbx_core). Use discrete exports.qbx_core:GetPlayer(src)
-        -- everywhere instead. Leave frameworkObject nil for qbox.
-        frameworkObject = nil
-        print("^2INFO:^0 QBox framework initialized on server (discrete qbx_core exports)")
+    local state, err = readJson('data/fleet_state.json')
+    if not state then
+        lib.print.warn(('data/fleet_state.json %s; packs show as vanilla (registry-refresh.sh copies it at start)'):format(err))
     else
-        print("^2INFO:^0 Running in standalone mode")
-    end
-    
-    -- Initialize job cache cleanup if caching is enabled
-    if Config.CacheJobInfo then
-        CreateThread(function()
-            while true do
-                Wait(Config.JobCacheTimeout or 300000) -- Default 5 minutes
-                Config.CleanJobCache()
+        local n = 0
+        for model, v in pairs(state) do
+            if type(v) == 'table' then
+                PACKS[model:lower()] = v.res or 'vanilla'
+                if v.class then CLASSES[model:lower()] = tostring(v.class):gsub('^%l', string.upper) end
+                if type(v.game) == 'string' and v.game ~= '' then GAMES[model:lower()] = v.game end
+                n = n + 1
             end
-        end)
-
-        if Config.Debug then
-            print("^2[AUTO-CONFIG]:^0 Job cache cleanup initialized")
         end
+        lib.print.info(('fleet state loaded: %d models with pack info'):format(n))
     end
-
-    -- Event-driven job cache invalidation
-    -- Listen for job changes instead of constant polling
-    SetupJobChangeListeners(currentFramework)
+    local em, err2 = readJson('data/emergency.json')
+    if not em then
+        lib.print.warn(('data/emergency.json %s; emergency vehicles show without departments'):format(err2))
+    else
+        local n = 0
+        for model, v in pairs(em) do
+            if type(v) == 'table' and v.dept then EMERGENCY[model:lower()] = { dept = v.dept, kind = v.kind or 'Other' }; n = n + 1 end
+        end
+        lib.print.info(('emergency fleet: %d models with department and kind'):format(n))
+    end
 end)
 
------------------------------------------------------------
--- EVENT-DRIVEN JOB CACHE INVALIDATION
--- Instead of constant polling, we listen for job changes
--- and invalidate cache only when necessary
------------------------------------------------------------
-function InvalidatePlayerJobCache(playerId)
-    if not playerId then return end
-
-    -- Clear all cache entries for this player
-    local keysToRemove = {}
-    for key, _ in pairs(Config.JobCache) do
-        if string.find(key, "^" .. tostring(playerId) .. ":") then
-            table.insert(keysToRemove, key)
+---Photo URLs from jg-vehiclestudio (the dealership uses the same export). Once per server run.
+local function loadPhotos()
+    if PHOTOS then return PHOTOS end
+    PHOTOS = {}
+    if GetResourceState('jg-vehiclestudio') ~= 'started' then
+        lib.print.warn('jg-vehiclestudio not running; no vehicle photos')
+        return PHOTOS
+    end
+    local registry = exports.qbx_core:GetVehiclesByName()
+    if type(registry) ~= 'table' then return PHOTOS end
+    local codes = {}
+    for model in pairs(registry) do codes[#codes + 1] = model end
+    local ok, images = pcall(function() return exports['jg-vehiclestudio']:getImages(codes, 'default') end)
+    if not ok or type(images) ~= 'table' then
+        lib.print.warn(('jg-vehiclestudio getImages failed: %s'):format(tostring(images)))
+        return PHOTOS
+    end
+    -- accept either { model = url }, { model = { url = ... } } or a list of { spawnCode/spawn_code, url/image }
+    local n = 0
+    for k, v in pairs(images) do
+        local model, url
+        if type(v) == 'string' then model, url = k, v
+        elseif type(v) == 'table' then
+            model = type(k) == 'string' and k or (v.spawnCode or v.spawn_code or v.model)
+            url = v.url or v.image or v.src
         end
+        if type(model) == 'string' and type(url) == 'string' and url ~= '' then PHOTOS[model:lower()] = url; n = n + 1 end
     end
-
-    for _, key in ipairs(keysToRemove) do
-        Config.JobCache[key] = nil
-        -- Also clear from ox_lib cache if available
-        if lib and lib.cache then
-            lib.cache.set('job_' .. key, nil, 0)
-        end
-    end
-
-    if Config.Debug then
-        print(("^2[JOB-CACHE]:^0 Invalidated cache for player %s (event-driven)"):format(playerId))
-    end
+    lib.print.info(('vehicle photos: %d of %d models'):format(n, #codes))
+    return PHOTOS
 end
 
-function SetupJobChangeListeners(framework)
-    if framework == 'esx' then
-        -- ESX job change event
-        RegisterNetEvent('esx:setJob')
-        AddEventHandler('esx:setJob', function(job, lastJob)
-            local src = source
-            InvalidatePlayerJobCache(src)
+local function allowed(src) return IsPlayerAceAllowed(src, 'dps.fleet') end
 
-            if Config.Debug then
-                print(("^2[JOB-CACHE]:^0 ESX job change: Player %s | %s -> %s"):format(
-                    src, lastJob and lastJob.name or "none", job.name
-                ))
-            end
-        end)
-        print("^2[JOB-CACHE]:^0 ESX job change listener registered")
+---Job name and grade level for a connected player, or nil if not loaded.
+---@param src number
+---@return string|nil jobName, number grade
+local function playerJob(src)
+    local player = exports.qbx_core:GetPlayer(src)
+    if not player then return nil end
+    local job = player.PlayerData and player.PlayerData.job
+    if not job then return nil end
+    return job.name, (job.grade and job.grade.level) or 0
+end
 
-    elseif framework == 'qbcore' then
-        -- QBCore job change event
-        RegisterNetEvent('QBCore:Server:OnJobUpdate')
-        AddEventHandler('QBCore:Server:OnJobUpdate', function(source, job)
-            InvalidatePlayerJobCache(source)
+-- Job names allowed in the workshop. Derived once at start from qbx_core when
+-- Config.AutoJobs is on, else from Config.JobMappings (see the workshop block below).
+local WORKSHOP_JOBS = {}
 
-            if Config.Debug then
-                print(("^2[JOB-CACHE]:^0 QBCore job change: Player %s | New job: %s"):format(
-                    source, job.name
-                ))
-            end
-        end)
+---The workshop job set as derived at start.
+---@return table<string, boolean>
+local function workshopJobSet() return WORKSHOP_JOBS end
 
-        -- Also listen for player data updates
-        RegisterNetEvent('QBCore:Server:PlayerDataUpdate')
-        AddEventHandler('QBCore:Server:PlayerDataUpdate', function(source, key, value)
-            if key == 'job' then
-                InvalidatePlayerJobCache(source)
-            end
-        end)
-        print("^2[JOB-CACHE]:^0 QBCore job change listeners registered")
+---Whether a player may open the workshop (EVM) panel.
+---@param src number
+---@return boolean ok, string|nil reason
+local function canWorkshop(src)
+    local jobName = playerJob(src)
+    return Access.canWorkshopSet(jobName, IsPlayerAceAllowed(src, 'command'), workshopJobSet(),
+        Config.EnableJobRestrictions ~= false)
+end
 
-    elseif framework == 'qbox' then
-        -- QBox uses similar events to QBCore
-        RegisterNetEvent('QBCore:Server:OnJobUpdate')
-        AddEventHandler('QBCore:Server:OnJobUpdate', function(source, job)
-            InvalidatePlayerJobCache(source)
+lib.callback.register('dps-fleet:server:workshopAccess', function(source)
+    local ok, why = canWorkshop(source)
+    return ok, why
+end)
 
-            if Config.Debug then
-                print(("^2[JOB-CACHE]:^0 QBox job change: Player %s | New job: %s"):format(
-                    source, job.name
-                ))
-            end
-        end)
+lib.callback.register('dps-fleet:server:open', function(source, alreadyHasData)
+    if not allowed(source) then return false end
+    if alreadyHasData then return true end
+    return true, { packs = PACKS, classes = CLASSES, emergency = EMERGENCY, games = GAMES, photos = loadPhotos() }
+end)
 
-        -- QBox-specific event
-        RegisterNetEvent('qbx_core:server:onJobUpdate')
-        AddEventHandler('qbx_core:server:onJobUpdate', function(source, job)
-            InvalidatePlayerJobCache(source)
-        end)
-        print("^2[JOB-CACHE]:^0 QBox job change listeners registered")
+local function registryHas(model)
+    local reg = exports.qbx_core:GetVehiclesByName()
+    return type(reg) == 'table' and reg[model] ~= nil
+end
+
+local function removeVehicle(veh)
+    if not veh or veh == 0 or not DoesEntityExist(veh) then return end
+    DeleteEntity(veh)
+end
+
+lib.callback.register('dps-fleet:server:spawn', function(source, model, mode, beside)
+    if not allowed(source) then return false, 'No access.' end
+    if type(model) ~= 'string' or #model > 40 or not registryHas(model) then return false, 'Unknown vehicle.' end
+    local ped = GetPlayerPed(source)
+    if not ped or ped == 0 then return false, 'No player ped.' end
+
+    local spawnSource, warp = ped, true
+    if mode == 'beside' then
+        if type(beside) ~= 'table' or type(beside.x) ~= 'number' or type(beside.y) ~= 'number' or type(beside.z) ~= 'number' then
+            return false, 'Bad spawn point.'
+        end
+        -- the client may only ask for a spot near itself
+        if #(GetEntityCoords(ped) - vector3(beside.x, beside.y, beside.z)) > 25.0 then return false, 'Spawn point too far away.' end
+        spawnSource = vector4(beside.x + 0.0, beside.y + 0.0, beside.z + 0.0, (tonumber(beside.w) or 0.0) + 0.0)
+        warp = false
+    else
+        local current = GetVehiclePedIsIn(ped, false)
+        if current ~= 0 then
+            local c, h = GetEntityCoords(current), GetEntityHeading(current)
+            removeVehicle(current)
+            spawnSource = vector4(c.x, c.y, c.z, h)
+            warp = ped -- qbx.spawnVehicle warps this ped when spawnSource is a coordinate
+        end
     end
 
-    -- Universal: Invalidate cache when player disconnects
-    AddEventHandler('playerDropped', function(reason)
-        local src = source
-        InvalidatePlayerJobCache(src)
+    local started = GetGameTimer()
+    local ok, netId = pcall(function()
+        local id = qbx.spawnVehicle({ model = model, spawnSource = spawnSource, warp = warp })
+        return id
     end)
-
-    print("^2[JOB-CACHE]:^0 Event-driven job cache invalidation active")
-end
-
------------------------------------------------------------
--- SERVER-SIDE AUTHORIZATION (DSRP security hardening)
--- Core defect fix: all authorization was client-side only.
--- Every menu-open and state-mutating net event now passes
--- through these SERVER-authoritative checks. Job is read via
--- discrete qbx_core exports; zone distance is recomputed from
--- the player's real server-side ped coords (no client input).
------------------------------------------------------------
-
--- Resolve a player's job name via discrete framework access (no GetCoreObject)
-local function GetAuthJobName(src)
-    if currentFramework == 'qbox' then
-        local Player = exports.qbx_core:GetPlayer(src)
-        return Player and Player.PlayerData and Player.PlayerData.job and Player.PlayerData.job.name or nil
-    elseif currentFramework == 'esx' and frameworkObject then
-        local xPlayer = frameworkObject.GetPlayerFromId(src)
-        return xPlayer and xPlayer.job and xPlayer.job.name or nil
-    elseif currentFramework == 'qbcore' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(src)
-        return Player and Player.PlayerData and Player.PlayerData.job and Player.PlayerData.job.name or nil
+    if not ok or type(netId) ~= 'number' then
+        lib.print.warn(('spawn failed for %s (src %s, %s): %s'):format(model, source, mode, tostring(netId)))
+        return false, 'Spawn failed.'
     end
-    return nil
-end
+    local veh = NetworkGetEntityFromNetworkId(netId)
+    local plate = veh ~= 0 and qbx.getVehiclePlate(veh) or nil
+    lib.print.info(('spawned %s plate %s for src %s (%s) in %d ms'):format(model, tostring(plate), source, mode, GetGameTimer() - started))
+    return true, plate, netId
+end)
 
--- Build the set of authorized emergency job names from config mappings
--- (police + fire + ambulance groups). Memoized: JobMappings is static after
--- init and this runs on every auth check.
-local emergencyJobSetCache = nil
-local function GetEmergencyJobSet()
-    if emergencyJobSetCache then return emergencyJobSetCache end
-    local set = {}
-    -- DPS 2026-09-27 Damon: "EVM any vehicle" for admins and mechanics — the mechanic group joins the access set.
-    for _, group in ipairs({'police', 'fire', 'ambulance', 'mechanic'}) do
-        local names = Config.JobMappings and Config.JobMappings[group]
-        if names then
-            for _, n in ipairs(names) do set[n] = true end
-        end
-    end
-    emergencyJobSetCache = set
-    return set
-end
-
--- Is this player employed in an authorized emergency job?
-local function IsPlayerAuthorized(src)
-    if not Config.EnableJobRestrictions then return true end
-    -- Resolve the player FIRST: an admin still on the multichar screen has no
-    -- loaded Player, and letting them past here crashes downstream handlers
-    -- (savePreset/GetPlayerJob) on a nil job. Admin bypass requires a loaded player.
-    local jobName = GetAuthJobName(src)
-    if not jobName then return false end
-    if IsPlayerAceAllowed(src, 'command') then return true end  -- server owner / admins, any job
-    return GetEmergencyJobSet()[jobName] == true
-end
-
--- Server-authoritative zone check using the player's REAL ped coords
-local function IsPlayerInModZone(src)
-    if Config.DisableZoneRestrictions then return true end  -- config fast-path first
-    if IsPlayerAceAllowed(src, 'command') then return true end  -- admins skip position check
-    local ped = GetPlayerPed(src)
+lib.callback.register('dps-fleet:server:delete', function(source, netId)
+    if not allowed(source) then return false end
+    if type(netId) ~= 'number' then return false end
+    local veh = NetworkGetEntityFromNetworkId(netId)
+    if not veh or veh == 0 or not DoesEntityExist(veh) or not IsEntityAVehicle(veh) then return false end
+    local ped = GetPlayerPed(source)
     if not ped or ped == 0 then return false end
-    local coords = GetEntityCoords(ped)
-    for _, zone in ipairs(Config.ModificationZones or {}) do
-        -- small tolerance for client/server position desync
-        if #(coords - zone.coords) <= (zone.radius + 2.0) then
-            return true
-        end
-    end
-    return false
-end
-
--- Combined gate for menu-open and any state mutation
-local function CanModifyVehicles(src)
-    return IsPlayerAuthorized(src) and IsPlayerInModZone(src)
-end
-
--- Validate a client-supplied netId actually maps to a vehicle the caller is
--- standing next to (prevents mutating arbitrary/other players' vehicles).
-local function ResolveCallerVehicle(src, netId)
-    if type(netId) ~= 'number' then return nil end
-    local vehicle = NetworkGetEntityFromNetworkId(netId)
-    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return nil end
-    local ped = GetPlayerPed(src)
-    if not ped or ped == 0 then return nil end
-    if #(GetEntityCoords(ped) - GetEntityCoords(vehicle)) > 10.0 then return nil end
-    return vehicle
-end
-
--- Validate a livery file path (charset + .yft, no path traversal)
-local function IsSafeLiveryFile(file)
-    if type(file) ~= 'string' or file == '' or #file > 128 then return false end
-    if file:find('%.%.') then return false end            -- no traversal
-    if not file:match('^[%w%s%-_/%.]+$') then return false end -- safe charset only
+    if #(GetEntityCoords(ped) - GetEntityCoords(veh)) > 30.0 then return false end
+    removeVehicle(veh)
     return true
-end
+end)
 
-local function DenyNotify(src, msg)
+-- ── workshop ──────────────────────────────────────────────────────────────────
+--[[
+    Server half of the workshop, ported from legacy/evm_server.lua (tables 384-470,
+    custom liveries and saved setups 494-760, field repair 879-990, presets and
+    livery memory 994-1230, repair charging 1436-1460). The vendor multi-framework
+    branches and the framework detector are gone: qbx_core and ox_inventory only.
+
+    Legacy event names are kept so the client halves need no rename; the old
+    request/reply event pairs are replaced by ox_lib callbacks. Every handler
+    re-checks canWorkshop(source), validates its arguments and — where a netId is
+    involved — proves the caller is standing at that vehicle.
+
+    Every vehicle_model is stored lowercase and matched with LOWER(vehicle_model),
+    so rows written by the legacy resource in mixed case still resolve.
+]]
+
+local MAX_LIVERIES_PER_MODEL = 20
+local MAX_PROPS_BYTES = 65535
+local REPAIR_KINDS = { full = true, emergency = true, field = true }
+
+-- model (lowercase) -> { { name = string, file = string }, ... }. Seeded from
+-- Config.CustomLiveries and the custom_liveries table at start, then kept in step
+-- with every add/remove so the callback answers without touching the database.
+local CUSTOM_LIVERIES = {}
+
+-- citizenid -> os.time() of the last completed field repair. Keyed on the character,
+-- not the src, so a reconnect does not hand out a fresh cooldown. Plain table, no
+-- timers: one five-minute entry per character costs nothing.
+local fieldRepairCooldowns = {}
+
+-- src -> GetGameTimer() of the last custom-livery broadcast. That event goes to
+-- every client and each one may spend up to three seconds waiting for the texture
+-- dictionary, so one broadcast per second per player is the ceiling.
+local liveryBroadcasts = {}
+
+-- src -> { [handler name] = true } while that handler's check-then-write is in
+-- flight. Two fast clicks on the same thing would otherwise both pass the
+-- limit/duplicate check before either row lands. Per handler, not per player: one
+-- livery apply writes livery memory and the vehicle setup in the same breath, and
+-- those two must not lock each other out.
+local busy = {}
+
+---@param src number
+---@param title string
+---@param description string
+---@param kind string|nil ox_lib notify type
+local function notify(src, title, description, kind)
     TriggerClientEvent('ox_lib:notify', src, {
-        title = 'Access Denied',
-        description = msg or 'You are not authorized to do that.',
-        type = 'error',
-        duration = 5000
+        title = title, description = description, type = kind or 'inform', duration = 5000,
     })
 end
 
--- ox_lib server callback: authoritative gate the client checks before opening the menu
-lib.callback.register('vehiclemods:server:canAccessMenu', function(src)
-    if not IsPlayerAuthorized(src) then
-        return false, 'Your job does not permit vehicle modifications.'
+---A guarded MySQL await: the database going away must not kill a handler.
+---Logs one warn line naming the handler so the console points straight at it.
+---@param what string handler name for the log line
+---@param fn function MySQL.<method>.await
+---@param ... any query, parameters
+---@return boolean ok, any result
+local function db(what, fn, ...)
+    local ok, result = pcall(fn, ...)
+    if not ok then
+        lib.print.warn(('%s: database error — %s'):format(what, tostring(result)))
+        return false, nil
     end
-    if not IsPlayerInModZone(src) then
-        return false, 'You must be at a designated emergency services garage.'
+    return true, result
+end
+
+---The one wording every write path uses when the database refuses.
+---@param src number
+local function dbFailed(src)
+    TriggerClientEvent('ox_lib:notify', src, {
+        title = 'Workshop', description = 'Could not save that right now.', type = 'error',
+    })
+end
+
+---Runs a check-then-write section under this player's lock for this handler, so
+---the lock is released whether the body returns, refuses or throws.
+---@param src number
+---@param what string handler name, also the lock key and the log line
+---@param body function
+local function underLock(src, what, body)
+    local locks = busy[src]
+    if not locks then
+        locks = {}
+        busy[src] = locks
     end
-    return true
-end)
+    if locks[what] then
+        return notify(src, 'Workshop', 'Hold on — the last change is still saving.', 'error')
+    end
+    locks[what] = true
+    local ran, err = pcall(body)
+    locks[what] = nil
+    if not ran then
+        lib.print.warn(('%s: failed — %s'):format(what, tostring(err)))
+        dbFailed(src)
+    end
+end
 
--- Initialize database
-local ox_mysql = exports['oxmysql']
+---Model hashes: the natives and joaat disagree on sign for hashes above 2^31,
+---so both sides are normalised to unsigned 32-bit before comparing.
+---@param veh number
+---@param modelName string
+---@return boolean
+local function vehicleIsModel(veh, modelName)
+    return (GetEntityModel(veh) % 0x100000000) == (joaat(modelName) % 0x100000000)
+end
 
-CreateThread(function()
-    Wait(1000) -- Wait for oxmysql to initialize
+---@param model any
+---@return string|nil lowercased model name
+local function validModel(model)
+    if type(model) ~= 'string' then return nil end
+    if #model == 0 or #model > 64 then return nil end
+    return model:lower()
+end
 
-    -- Create database tables if they don't exist
-    ox_mysql:execute([[
+---Config.InputValidation applied to a preset or livery name (legacy Config.ValidateName).
+---@param name any
+---@return string|nil trimmed, string|nil reason
+local function validName(name)
+    local iv = Config.InputValidation or {}
+    if type(name) ~= 'string' then return nil, 'Invalid name.' end
+    local trimmed = name:match('^%s*(.-)%s*$') or ''
+    if #trimmed < math.max(iv.minNameLength or 1, 1) then return nil, 'That name is too short.' end
+    local maxLen = iv.maxNameLength or 32
+    if #trimmed > maxLen then return nil, ('That name is too long (max %d characters).'):format(maxLen) end
+    if iv.blockSpecialChars and iv.allowedCharacters and not trimmed:match(iv.allowedCharacters) then
+        return nil, 'That name has characters that are not allowed.'
+    end
+    return trimmed
+end
+
+---@param src number
+---@return string|nil citizenid
+local function citizenidOf(src)
+    local player = exports.qbx_core:GetPlayer(src)
+    return player and player.PlayerData and player.PlayerData.citizenid or nil
+end
+
+---@param value any a JSON column as oxmysql hands it back
+---@return table|nil
+local function decodeJson(value)
+    if type(value) == 'table' then return value end
+    if type(value) ~= 'string' or value == '' then return nil end
+    local ok, data = pcall(json.decode, value)
+    if not ok or type(data) ~= 'table' then return nil end
+    return data
+end
+
+---A client-supplied netId must map to a vehicle the caller is standing next to
+---(legacy ResolveCallerVehicle: stops a client mutating someone else's vehicle).
+---@param src number
+---@param netId any
+---@return number|nil entity
+local function resolveCallerVehicle(src, netId)
+    if type(netId) ~= 'number' then return nil end
+    local veh = NetworkGetEntityFromNetworkId(netId)
+    if not veh or veh == 0 or not DoesEntityExist(veh) or not IsEntityAVehicle(veh) then return nil end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return nil end
+    if #(GetEntityCoords(ped) - GetEntityCoords(veh)) > 10.0 then return nil end
+    return veh
+end
+
+---@param model string lowercased
+---@return table list
+local function liveriesFor(model)
+    local list = CUSTOM_LIVERIES[model]
+    if not list then list = {}; CUSTOM_LIVERIES[model] = list end
+    return list
+end
+
+-----------------------------------------------------------------------
+-- start-up: job set, aces, tables, custom liveries (one thread, then it ends)
+-----------------------------------------------------------------------
+
+---Config.JobMappings fallback: every name in every group.
+---@return table<string, boolean>
+local function jobsFromMappings()
+    local set = {}
+    for _, names in pairs(Config.JobMappings or {}) do
+        for _, name in ipairs(names) do set[name] = true end
+    end
+    return set
+end
+
+local function deriveWorkshopJobs()
+    local set, origin
+    if Config.AutoJobs then
+        local ok, jobs = pcall(function() return exports.qbx_core:GetJobs() end)
+        if ok and type(jobs) == 'table' then
+            set, origin = {}, 'qbx_core types leo+ems'
+            for name, job in pairs(jobs) do
+                local kind = type(job) == 'table' and job.type or nil
+                if kind == 'leo' or kind == 'ems' then set[name] = true end
+            end
+            for _, name in ipairs(Config.ExtraWorkshopJobs or {}) do set[name] = true end
+        else
+            lib.print.warn('qbx_core GetJobs unavailable; workshop jobs fall back to Config.JobMappings')
+            set, origin = jobsFromMappings(), 'Config.JobMappings (GetJobs failed)'
+        end
+    else
+        set, origin = jobsFromMappings(), 'Config.JobMappings'
+    end
+
+    local names = {}
+    for name in pairs(set) do names[#names + 1] = name end
+    table.sort(names)
+    WORKSHOP_JOBS = set
+    lib.print.info(('workshop jobs from %s: %d — %s'):format(origin, #names, table.concat(names, ' ')))
+end
+
+local function grantAces()
+    if not Config.AutoAces then return end
+    local granted = {}
+    for _, group in ipairs({ 'group.admin', 'group.tester' }) do
+        if IsPrincipalAceAllowed(group, 'dps.fleet') then
+            granted[#granted + 1] = group .. '=already'
+        else
+            ExecuteCommand(('add_ace %s dps.fleet allow'):format(group))
+            granted[#granted + 1] = group .. '=granted'
+        end
+    end
+    lib.print.info(('dps.fleet ace: %s'):format(table.concat(granted, ' ')))
+end
+
+local WORKSHOP_TABLES = {
+    custom_liveries = [[
         CREATE TABLE IF NOT EXISTS custom_liveries (
             id INT NOT NULL AUTO_INCREMENT,
             vehicle_model VARCHAR(255) NOT NULL,
@@ -390,16 +420,8 @@ CreateThread(function()
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id)
         )
-    ]], {}, function(result)
-        if result then
-            print("^2INFO:^0 custom_liveries table created or already exists.")
-        else
-            print("^1ERROR:^0 Failed to create custom_liveries table.")
-        end
-    end)
-
-    -- Create vehicle_mods table if it doesn't exist
-    ox_mysql:execute([[
+    ]],
+    vehicle_mods = [[
         CREATE TABLE IF NOT EXISTS vehicle_mods (
             id INT NOT NULL AUTO_INCREMENT,
             vehicle_model VARCHAR(255) NOT NULL,
@@ -409,16 +431,8 @@ CreateThread(function()
             PRIMARY KEY (id),
             UNIQUE KEY vehicle_model_unique (vehicle_model)
         )
-    ]], {}, function(result)
-        if result then
-            print("^2INFO:^0 vehicle_mods table created or already exists.")
-        else
-            print("^1ERROR:^0 Failed to create vehicle_mods table.")
-        end
-    end)
-
-    -- Create vehicle_presets table for fleet standardization (v2.1.0+)
-    ox_mysql:execute([[
+    ]],
+    vehicle_presets = [[
         CREATE TABLE IF NOT EXISTS vehicle_presets (
             id INT NOT NULL AUTO_INCREMENT,
             preset_name VARCHAR(100) NOT NULL,
@@ -432,16 +446,8 @@ CreateThread(function()
             UNIQUE KEY unique_preset (owner_identifier, preset_name, vehicle_model),
             INDEX idx_job_preset (job_preset)
         )
-    ]], {}, function(result)
-        if result then
-            print("^2INFO:^0 vehicle_presets table created or already exists.")
-        else
-            print("^1ERROR:^0 Failed to create vehicle_presets table.")
-        end
-    end)
-
-    -- Create player_livery_memory table for auto-apply (v2.1.0+)
-    ox_mysql:execute([[
+    ]],
+    player_livery_memory = [[
         CREATE TABLE IF NOT EXISTS player_livery_memory (
             id INT NOT NULL AUTO_INCREMENT,
             identifier VARCHAR(255) NOT NULL,
@@ -454,1012 +460,871 @@ CreateThread(function()
             PRIMARY KEY (id),
             UNIQUE KEY unique_memory (identifier, vehicle_model)
         )
-    ]], {}, function(result)
-        if result then
-            print("^2INFO:^0 player_livery_memory table created or already exists.")
-        else
-            print("^1ERROR:^0 Failed to create player_livery_memory table.")
+    ]],
+    -- Task 6b: which LVC tones a siren key is allowed. Keyed on the siren key
+    -- (the game name cut to the 11 characters GTA keeps), not the spawn name, so
+    -- every spawn code sharing one yft shares one row — the way LVC reads it.
+    fleet_siren_assignments = [[
+        CREATE TABLE IF NOT EXISTS fleet_siren_assignments (
+            -- utf8mb4_bin: siren keys are case-sensitive in LVC, and the default
+            -- collation would make FIRETRUK and firetruk the same primary key.
+            siren_key VARCHAR(11) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            model VARCHAR(64),
+            tones JSON NOT NULL,
+            updated_by VARCHAR(64),
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (siren_key)
+        )
+    ]],
+}
+local WORKSHOP_TABLE_ORDER = { 'custom_liveries', 'vehicle_mods', 'vehicle_presets', 'player_livery_memory', 'fleet_siren_assignments' }
+
+local function ensureTables()
+    local made, failed = {}, {}
+    for _, name in ipairs(WORKSHOP_TABLE_ORDER) do
+        local ok = db('ensureTables ' .. name, MySQL.query.await, WORKSHOP_TABLES[name])
+        if ok then made[#made + 1] = name else failed[#failed + 1] = name end
+    end
+    -- One custom livery name per model is a database rule, not a race: with this key
+    -- INSERT IGNORE in addCustomLivery reports affectedRows 0 instead of a second row.
+    -- MariaDB syntax; it fails harmlessly if the table already holds duplicates.
+    local keyOk = db('ensureTables uq_model_livery', MySQL.query.await,
+        'ALTER TABLE custom_liveries ADD UNIQUE KEY IF NOT EXISTS uq_model_livery (vehicle_model, livery_name)')
+    if not keyOk then failed[#failed + 1] = 'uq_model_livery' end
+    lib.print.info(('workshop tables ready: %s (uq_model_livery %s)'):format(
+        table.concat(made, ' '), keyOk and 'ok' or 'FAILED'))
+    if not keyOk then
+        lib.print.warn('uq_model_livery is missing: duplicate custom livery names are only caught in memory, not by the database')
+    end
+    if #failed > 0 then lib.print.warn(('workshop tables FAILED: %s'):format(table.concat(failed, ' '))) end
+    return #failed == 0
+end
+
+local function loadCustomLiveries()
+    local seeded = 0
+    for model, list in pairs(Config.CustomLiveries or {}) do
+        if type(list) == 'table' then
+            local target = liveriesFor(tostring(model):lower())
+            for _, entry in ipairs(list) do
+                if type(entry) == 'table' and entry.file then
+                    target[#target + 1] = { name = entry.name or entry.file, file = entry.file }
+                    seeded = seeded + 1
+                end
+            end
         end
+    end
+
+    local ok, rows = db('loadCustomLiveries', MySQL.query.await,
+        'SELECT vehicle_model, livery_name, livery_file FROM custom_liveries')
+    if not ok then
+        lib.print.info(('custom liveries: %d from config, database unavailable'):format(seeded))
+        return
+    end
+    local loaded = 0
+    for _, row in ipairs(rows or {}) do
+        local model = validModel(row.vehicle_model)
+        if model and row.livery_file then
+            local target = liveriesFor(model)
+            target[#target + 1] = { name = row.livery_name or row.livery_file, file = row.livery_file }
+            loaded = loaded + 1
+        end
+    end
+    lib.print.info(('custom liveries: %d from config, %d from the database'):format(seeded, loaded))
+end
+
+-----------------------------------------------------------------------
+-- sirens (Task 6b)
+--
+-- dps-fleet owns the assignment, LVC owns the sound. The workshop writes a tone
+-- list per siren key; the whole table is cached here, handed to every client at
+-- their resource start and patched by a broadcast on every write, and LVC's
+-- credited hook (lvc/UTIL/cl_utils.lua) merges it over its own SIRENS.lua table.
+-----------------------------------------------------------------------
+
+-- siren key -> tone id list, the live cache. Filled at start, patched on write.
+local SIREN_BY_KEY = {}
+-- The copy handed out to callbacks and the export, so nothing outside can edit
+-- the cache. Rebuilt on the first read after a change, never per call.
+local sirenSnapshot = nil
+
+---@return table<string, number[]>
+local function sirenAssignments()
+    if sirenSnapshot then return sirenSnapshot end
+    local out = {}
+    for key, tones in pairs(SIREN_BY_KEY) do
+        local copy = {}
+        for i, id in ipairs(tones) do copy[i] = id end
+        out[key] = copy
+    end
+    sirenSnapshot = out
+    return out
+end
+
+local function loadSirenAssignments()
+    local ok, rows = db('loadSirenAssignments', MySQL.query.await,
+        'SELECT siren_key, tones FROM fleet_siren_assignments')
+    if not ok then
+        lib.print.warn('siren assignments: database unavailable; LVC keeps its SIRENS.lua table')
+        return
+    end
+    local loaded, rejected = 0, 0
+    for _, row in ipairs(rows or {}) do
+        local tones = decodeJson(row.tones)
+        if type(row.siren_key) == 'string' and Workshop.validTones(tones, #Workshop.SIREN_TONES) then
+            SIREN_BY_KEY[row.siren_key] = tones
+            loaded = loaded + 1
+        else
+            rejected = rejected + 1
+        end
+    end
+    sirenSnapshot = nil
+    lib.print.info(('siren assignments: %d keys loaded, %d rows rejected (of %d tones)'):format(
+        loaded, rejected, #Workshop.SIREN_TONES))
+end
+
+---A game name as read off a live vehicle. GTA keeps 11 characters of it, so the
+---client can only ever send a short, plain token; anything else is refused.
+---@param name any
+---@return string|nil
+local function validGameName(name)
+    if type(name) ~= 'string' then return nil end
+    if #name < 1 or #name > 64 then return nil end
+    if not name:match('^[%w_%-%.]+$') then return nil end
+    return name
+end
+
+---The siren key for a model. GetDisplayNameFromVehicleModel is what LVC looks the
+---assignment up by, so the name the client read off the live vehicle wins; the
+---registry game name from data/fleet_state.json answers when there is none (that
+---file is keyed on the spawn name and does not cover every model), and the spawn
+---name itself is the last resort.
+---@param model string lowercased model name
+---@param gameName any what the client read off the vehicle, unvalidated
+---@return string|nil
+local function sirenKeyFor(model, gameName)
+    return Workshop.sirenKey(validGameName(gameName) or GAMES[model], model)
+end
+
+-- The sheet asks for one model: its key, what is saved for it and which preset
+-- that is. nil tones mean nothing is saved and LVC still uses SIRENS.lua.
+lib.callback.register('dps-fleet:server:sirens', function(source, modelName, gameName)
+    if not canWorkshop(source) then return false end
+    local model = validModel(modelName)
+    if not model then return false end
+    local key = sirenKeyFor(model, gameName)
+    if not key then return false end
+    local tones = sirenAssignments()[key]
+    return { key = key, model = model, tones = tones, preset = tones and Workshop.sirenPresetOf(tones) or nil }
+end)
+
+-- Every client caches the whole table for LVC, so this one is not workshop-gated:
+-- a player with no workshop access still drives vehicles whose tones were set.
+lib.callback.register('dps-fleet:server:allSirens', function()
+    return sirenAssignments()
+end)
+
+lib.callback.register('dps-fleet:server:setSirens', function(source, modelName, tones, gameName)
+    local src = source
+    if not canWorkshop(src) then return false, 'You may not change siren tones.' end
+    local model = validModel(modelName)
+    if not model then return false, 'That vehicle model is not valid.' end
+    if not Workshop.validTones(tones, #Workshop.SIREN_TONES) then
+        return false, ('Siren tones must be 1 to %d whole numbers between 1 and %d.'):format(
+            Workshop.SIREN_SLOT_MAX, #Workshop.SIREN_TONES)
+    end
+    local key = sirenKeyFor(model, gameName)
+    if not key then return false, 'That vehicle has no siren key.' end
+    local citizenid = citizenidOf(src)
+
+    -- Never store the client's table: rebuild it as plain integers.
+    local list = {}
+    for i, id in ipairs(tones) do list[i] = math.floor(id) end
+    local encoded = json.encode(list)
+
+    -- underLock owns the pcall and the per-player lock, so the result comes back
+    -- through this flag; the panel shows the message, db() logs the reason.
+    local saved = false
+    underLock(src, 'setSirens', function()
+        local ok = db('setSirens', MySQL.insert.await, [[
+            INSERT INTO fleet_siren_assignments (siren_key, model, tones, updated_by)
+            VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE tones = VALUES(tones), model = VALUES(model), updated_by = VALUES(updated_by)
+        ]], { key, model, encoded, citizenid })
+        if not ok then return end
+        SIREN_BY_KEY[key] = list
+        sirenSnapshot = nil
+        TriggerClientEvent('dps-fleet:client:sirens', -1, { key = key, tones = list })
+        saved = true
+        lib.print.info(('siren tones for %s (key %s) set to %s by %s (src %s)'):format(
+            model, key, table.concat(list, ','), citizenid or 'unknown', src))
     end)
-
-    -- Load custom liveries from database
-    ox_mysql:execute("SELECT vehicle_model, livery_name, livery_file FROM custom_liveries", {}, function(result)
-        if result and #result > 0 then
-            for _, livery in ipairs(result) do
-                if not Config.CustomLiveries[livery.vehicle_model] then
-                    Config.CustomLiveries[livery.vehicle_model] = {}
-                end
-                
-                table.insert(Config.CustomLiveries[livery.vehicle_model], {
-                    name = livery.livery_name,
-                    file = livery.livery_file
-                })
-            end
-            
-            print("^2INFO:^0 Loaded " .. #result .. " custom liveries from database.")
-        else
-            print("^3INFO:^0 No custom liveries found in database.")
-        end
-    end)
-    
-    print("^2INFO:^0 Vehicle Modification System initialized successfully.")
-end)
-
--- Apply a custom livery to a vehicle
--- M1 FIX: was AddEventHandler-only (dead path). Now registered as a net event
--- with server-side auth + netId validation. Broadcast stays -1 so the cosmetic
--- change renders for every client that streams the vehicle, but only after the
--- caller is proven authorized and standing at the validated vehicle.
-RegisterNetEvent('vehiclemods:server:applyCustomLivery')
-AddEventHandler('vehiclemods:server:applyCustomLivery', function(netId, vehicleModelName, liveryFile)
-    local src = source
-
-    if not CanModifyVehicles(src) then
-        return DenyNotify(src, 'You are not authorized to modify vehicles here.')
-    end
-
-    local vehicle = ResolveCallerVehicle(src, netId)
-    if not vehicle then
-        return DenyNotify(src, 'Vehicle not found or out of range.')
-    end
-
-    if not IsSafeLiveryFile(liveryFile) then
-        return DenyNotify(src, 'Invalid livery file.')
-    end
-
-    TriggerClientEvent('vehiclemods:client:setCustomLivery', -1, netId, vehicleModelName, liveryFile)
-
-    if Config.Debug then
-        print("^2DEBUG:^0 Applied custom livery " .. tostring(vehicleModelName) .. "/" .. tostring(liveryFile) .. " to vehicle with netId " .. tostring(netId))
-    end
-end)
-
--- Clear custom livery from a vehicle
-RegisterNetEvent('vehiclemods:server:clearCustomLivery')
-AddEventHandler('vehiclemods:server:clearCustomLivery', function(netId)
-    local src = source
-
-    if not CanModifyVehicles(src) then
-        return DenyNotify(src, 'You are not authorized to modify vehicles here.')
-    end
-
-    local vehicle = ResolveCallerVehicle(src, netId)
-    if not vehicle then
-        return DenyNotify(src, 'Vehicle not found or out of range.')
-    end
-
-    -- Broadcast to all clients to clear the custom livery (validated netId)
-    TriggerClientEvent('vehiclemods:client:clearCustomLivery', -1, netId)
-
-    if Config.Debug then
-        print("^2DEBUG:^0 Cleared custom livery from vehicle with netId " .. tostring(netId))
-    end
-end)
-
--- Save vehicle modifications
-RegisterNetEvent('vehiclemods:server:saveModifications')
-AddEventHandler('vehiclemods:server:saveModifications', function(vehicleModel, vehicleProps)
-    local src = source
-    local playerId = tostring(src) -- In standalone mode, use the player's server ID
-
-    if not CanModifyVehicles(src) then
-        return DenyNotify(src, 'You are not authorized to save vehicle modifications here.')
-    end
-
-    -- Input validation: reject malformed/oversized DB writes
-    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
-        return DenyNotify(src, 'Invalid vehicle model.')
-    end
-    if type(vehicleProps) ~= 'string' or #vehicleProps > 65535 then
-        return DenyNotify(src, 'Invalid vehicle data.')
-    end
-
-    if Config.Debug then
-        print("^2DEBUG:^0 Saving modifications for vehicle: " .. vehicleModel)
-    end
-
-    ox_mysql:execute("INSERT INTO vehicle_mods (vehicle_model, extras, player_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE extras = VALUES(extras)",
-        {vehicleModel, vehicleProps, playerId})
-        
-    TriggerClientEvent('ox_lib:notify', src, {
-        title = 'Vehicle Saved',
-        description = 'Your vehicle configuration has been saved.',
-        type = 'success',
-        duration = 5000
-    })
-end)
-
--- Add a new custom livery
--- Add a new custom livery
-RegisterNetEvent('vehiclemods:server:addCustomLivery')
-AddEventHandler('vehiclemods:server:addCustomLivery', function(vehicleModel, liveryName, liveryFile)
-    local src = source
-
-    -- Server-side authorization
-    if not CanModifyVehicles(src) then
-        return DenyNotify(src, 'You are not authorized to add liveries here.')
-    end
-
-    -- Input validation
-    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
-        return DenyNotify(src, 'Invalid vehicle model.')
-    end
-
-    -- M4 FIX: validate livery name (length/charset) before it hits the DB
-    local nameOk, nameOrErr = Config.ValidateName(liveryName)
-    if not nameOk then
-        return DenyNotify(src, nameOrErr or 'Invalid livery name.')
-    end
-    liveryName = nameOrErr -- use trimmed/validated value
-
-    if not IsSafeLiveryFile(liveryFile) then
-        return DenyNotify(src, 'Invalid livery file.')
-    end
-
-    -- Don't add "liveries/" prefix to the file path anymore
-    -- Just ensure it has .yft extension
-    if not string.match(liveryFile, "%.yft$") then
-        liveryFile = liveryFile .. ".yft"
-    end
-
-    -- First, check if the vehicle model exists in the custom liveries config
-    if not Config.CustomLiveries[vehicleModel:lower()] then
-        Config.CustomLiveries[vehicleModel:lower()] = {}
-    end
-    
-    -- Check if we've reached the limit of 20 liveries for this vehicle
-    if #Config.CustomLiveries[vehicleModel:lower()] >= 20 then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Limit Reached',
-            description = 'This vehicle already has the maximum of 20 custom liveries.',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    -- Add the new livery
-    table.insert(Config.CustomLiveries[vehicleModel:lower()], {
-        name = liveryName,
-        file = liveryFile
-    })
-    
-    -- Save to database
-    ox_mysql:execute("INSERT INTO custom_liveries (vehicle_model, livery_name, livery_file) VALUES (?, ?, ?)",
-        {vehicleModel:lower(), liveryName, liveryFile})
-    
-    TriggerClientEvent('ox_lib:notify', src, {
-        title = 'Livery Added',
-        description = 'Custom livery "' .. liveryName .. '" added for ' .. vehicleModel,
-        type = 'success',
-        duration = 5000
-    })
-    
-    -- Broadcast the updated config to all clients
-    TriggerClientEvent('vehiclemods:client:updateCustomLiveries', -1, Config.CustomLiveries)
-end)
-
--- Request vehicle configuration
-RegisterNetEvent('vehiclemods:server:requestVehicleConfig')
-AddEventHandler('vehiclemods:server:requestVehicleConfig', function(vehicleModel)
-    local src = source
-    local playerId = tostring(src) -- In standalone mode, use the player's server ID
-
-    if not IsPlayerAuthorized(src) then
-        return DenyNotify(src, 'Your job does not permit vehicle modifications.')
-    end
-    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
-        return
-    end
-
-    -- Check if config exists in database
-    ox_mysql:execute('SELECT extras FROM vehicle_mods WHERE vehicle_model = ?', {vehicleModel},
-        function(result)
-            if result and result[1] and result[1].extras then
-                -- Send the configuration back to the client
-                TriggerClientEvent('vehiclemods:client:applyVehicleConfig', src, vehicleModel, result[1].extras)
-                
-                if Config.Debug then
-                    print("^2DEBUG:^0 Sent saved configuration for " .. vehicleModel .. " to player " .. src)
-                end
-            else
-                if Config.Debug then
-                    print("^3DEBUG:^0 No saved configuration found for " .. vehicleModel)
-                end
-            end
-        end
-    )
-end)
-
--- Remove a custom livery
-RegisterNetEvent('vehiclemods:server:removeCustomLivery')
-AddEventHandler('vehiclemods:server:removeCustomLivery', function(vehicleModel, liveryName)
-    local src = source
-
-    if not CanModifyVehicles(src) then
-        return DenyNotify(src, 'You are not authorized to remove liveries here.')
-    end
-    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 255 then
-        return DenyNotify(src, 'Invalid vehicle model.')
-    end
-    if type(liveryName) ~= 'string' or liveryName == '' then
-        return DenyNotify(src, 'Invalid livery name.')
-    end
-
-    -- Check if the vehicle model exists in the custom liveries config
-    if not Config.CustomLiveries[vehicleModel:lower()] then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Error',
-            description = 'No custom liveries found for this vehicle.',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    -- Find and remove the livery
-    local removed = false
-    for i, livery in ipairs(Config.CustomLiveries[vehicleModel:lower()]) do
-        if livery.name == liveryName then
-            table.remove(Config.CustomLiveries[vehicleModel:lower()], i)
-            removed = true
-            break
-        end
-    end
-    
-    if removed then
-        -- Remove from database
-        ox_mysql:execute("DELETE FROM custom_liveries WHERE vehicle_model = ? AND livery_name = ?",
-            {vehicleModel:lower(), liveryName})
-        
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Livery Removed',
-            description = 'Custom livery "' .. liveryName .. '" removed from ' .. vehicleModel,
-            type = 'success',
-            duration = 5000
-        })
-        
-        -- Broadcast the updated config to all clients
-        TriggerClientEvent('vehiclemods:client:updateCustomLiveries', -1, Config.CustomLiveries)
-    else
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Error',
-            description = 'Livery "' .. liveryName .. '" not found.',
-            type = 'error',
-            duration = 5000
-        })
-    end
-end)
-
--- Send all custom liveries to a client when requested
-RegisterNetEvent('vehiclemods:server:requestCustomLiveries')
-AddEventHandler('vehiclemods:server:requestCustomLiveries', function()
-    local src = source
-    if not IsPlayerAuthorized(src) then
-        return DenyNotify(src, 'Your job does not permit vehicle modifications.')
-    end
-    TriggerClientEvent('vehiclemods:client:updateCustomLiveries', src, Config.CustomLiveries)
-end)
-
--- Initialize custom liveries when resource starts
--- NOTE: custom liveries are already loaded into Config.CustomLiveries during
--- initialisation above. This handler loaded them a SECOND time and appended into
--- the same tables with no de-dup, so after every start each livery appeared twice
--- in the menus, the duplicated list was broadcast to all clients, and the
--- per-vehicle livery cap was effectively halved. (The duplicate log line
--- "No custom liveries found in database." printed twice made it visible.)
-AddEventHandler('onResourceStart', function(resourceName)
-    if GetCurrentResourceName() ~= resourceName then return end
-    -- intentionally no livery reload here; see note above
-end)
-
--- Duplicate event handler removed - functionality already exists above
-
------------------------------------------------------------
--- FIELD REPAIR SYSTEM (v2.1.0+)
--- Server-side item checking and cooldown management
------------------------------------------------------------
-local fieldRepairCooldowns = {} -- Track per-player cooldowns
-
--- Get player identifier based on framework
-local function GetPlayerIdentifier(playerId)
-    if currentFramework == 'esx' and frameworkObject then
-        local xPlayer = frameworkObject.GetPlayerFromId(playerId)
-        return xPlayer and xPlayer.identifier or nil
-    elseif currentFramework == 'qbcore' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        return Player and Player.PlayerData.citizenid or nil
-    elseif currentFramework == 'qbox' then
-        -- Discrete qbx_core export (no core object on this build)
-        local Player = exports.qbx_core:GetPlayer(playerId)
-        return Player and Player.PlayerData and Player.PlayerData.citizenid or nil
-    end
-    return 'player_' .. tostring(playerId) -- Fallback for standalone
-end
-
--- Get player job based on framework
-local function GetPlayerJob(playerId)
-    if currentFramework == 'esx' and frameworkObject then
-        local xPlayer = frameworkObject.GetPlayerFromId(playerId)
-        if xPlayer then
-            return xPlayer.job.name, xPlayer.job.grade
-        end
-    elseif currentFramework == 'qbcore' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
-            return Player.PlayerData.job.name, Player.PlayerData.job.grade.level
-        end
-    elseif currentFramework == 'qbox' then
-        -- Discrete qbx_core export (no core object on this build)
-        local Player = exports.qbx_core:GetPlayer(playerId)
-        if Player and Player.PlayerData then
-            return Player.PlayerData.job.name, Player.PlayerData.job.grade.level
-        end
-    end
-    return nil, 0
-end
-
--- Check if player has required item
-local function HasRequiredItem(playerId, items)
-    if currentFramework == 'esx' and frameworkObject then
-        local xPlayer = frameworkObject.GetPlayerFromId(playerId)
-        if xPlayer then
-            for _, itemName in ipairs(items) do
-                local item = xPlayer.getInventoryItem(itemName)
-                if item and item.count > 0 then
-                    return true, itemName
-                end
-            end
-        end
-    elseif currentFramework == 'qbcore' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
-            for _, itemName in ipairs(items) do
-                local item = Player.Functions.GetItemByName(itemName)
-                if item and item.amount > 0 then
-                    return true, itemName
-                end
-            end
-        end
-    elseif currentFramework == 'qbox' then
-        -- QBox uses ox_inventory (frameworkObject is nil on this build, so
-        -- the old `and frameworkObject` guard made this branch unreachable —
-        -- it only worked by falling through to the standalone else).
-        -- Keep the resource-state guard that fallback provided: if ox_inventory
-        -- isn't running (e.g. mid-restart), allow rather than throw on the export.
-        if GetResourceState('ox_inventory') ~= 'started' then
-            return true, items[1]
-        end
-        for _, itemName in ipairs(items) do
-            local hasItem = exports.ox_inventory:GetItemCount(playerId, itemName)
-            if hasItem and hasItem > 0 then
-                return true, itemName
-            end
-        end
-    else
-        -- Standalone - always allow or check ox_inventory if available
-        if GetResourceState('ox_inventory') == 'started' then
-            for _, itemName in ipairs(items) do
-                local hasItem = exports.ox_inventory:GetItemCount(playerId, itemName)
-                if hasItem and hasItem > 0 then
-                    return true, itemName
-                end
-            end
-        else
-            return true, items[1] -- Allow in standalone without inventory
-        end
-    end
-    return false, nil
-end
-
--- Remove item from player inventory
-local function RemoveItem(playerId, itemName)
-    if currentFramework == 'esx' and frameworkObject then
-        local xPlayer = frameworkObject.GetPlayerFromId(playerId)
-        if xPlayer then
-            xPlayer.removeInventoryItem(itemName, 1)
-            return true
-        end
-    elseif currentFramework == 'qbcore' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
-            Player.Functions.RemoveItem(itemName, 1)
-            TriggerClientEvent('inventory:client:ItemBox', playerId, frameworkObject.Shared.Items[itemName], 'remove')
-            return true
-        end
-    elseif currentFramework == 'qbox' or GetResourceState('ox_inventory') == 'started' then
-        exports.ox_inventory:RemoveItem(playerId, itemName, 1)
-        return true
-    end
-    return true -- Standalone without inventory
-end
-
--- Field repair validation
-RegisterNetEvent('vehiclemods:server:requestFieldRepair')
-AddEventHandler('vehiclemods:server:requestFieldRepair', function()
-    local src = source
-    local cfg = Config.FieldRepair
-
-    if not cfg or not cfg.enabled then
-        TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, false, 'Field repair is disabled')
-        return
-    end
-
-    -- Check cooldown
-    local currentTime = os.time()
-    if fieldRepairCooldowns[src] and (currentTime - fieldRepairCooldowns[src]) < (cfg.cooldown / 1000) then
-        local remaining = math.ceil((cfg.cooldown / 1000) - (currentTime - fieldRepairCooldowns[src]))
-        TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, false,
-            ('Field repair on cooldown. %d seconds remaining.'):format(remaining))
-        return
-    end
-
-    -- Check job if required
-    local playerJob, playerGrade = GetPlayerJob(src)
-    local jobAllowed = false
-
-    if cfg.allowedJobs and #cfg.allowedJobs > 0 then
-        for _, allowedJob in ipairs(cfg.allowedJobs) do
-            if playerJob == allowedJob then
-                jobAllowed = true
-                break
-            end
-        end
-
-        if not jobAllowed then
-            TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, false,
-                'Your job does not allow field repairs')
-            return
-        end
-
-        -- Check grade
-        if cfg.minGrade > 0 and playerGrade < cfg.minGrade then
-            TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, false,
-                ('Requires job grade %d+'):format(cfg.minGrade))
-            return
-        end
-    end
-
-    -- Check for required item — PRESENCE only. Payment, kit consumption and
-    -- the cooldown all happen in completeFieldRepair below, AFTER the client's
-    -- progress bar finishes: canceling costs nothing, and a failed payment
-    -- can't eat the kit. (Review catch 2026-08-28.)
-    if cfg.requireItem then
-        local hasItem = HasRequiredItem(src, cfg.alternativeItems or {cfg.itemName})
-        if not hasItem then
-            TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, false,
-                'You need a repair kit to perform field repairs')
-            return
-        end
-    end
-
-    -- Approved: the client runs the progress bar, then calls completeFieldRepair
-    TriggerClientEvent('vehiclemods:client:fieldRepairResult', src, true, nil, cfg.maxEngineRepair, cfg.repairTime)
-
-    if Config.Debug then
-        print(("^2[FIELD-REPAIR]:^0 Player %s approved for field repair (Job: %s, Grade: %d)"):format(
-            src, playerJob or "unknown", playerGrade))
-    end
-end)
-
--- Phase 2 of field repair: the client's progress bar finished. Re-validate,
--- charge, consume the kit and start the cooldown — completion-only, so a
--- canceled repair costs nothing.
-lib.callback.register('vehiclemods:server:completeFieldRepair', function(src)
-    local cfg = Config.FieldRepair
-    if not cfg or not cfg.enabled then return false, 'Field repair is disabled' end
-
-    -- Cooldown re-check (guards double completion)
-    local currentTime = os.time()
-    if fieldRepairCooldowns[src] and (currentTime - fieldRepairCooldowns[src]) < (cfg.cooldown / 1000) then
-        return false, 'Field repair on cooldown'
-    end
-
-    -- Job re-check
-    if cfg.allowedJobs and #cfg.allowedJobs > 0 then
-        local playerJob = GetPlayerJob(src)
-        local jobAllowed = false
-        for _, allowedJob in ipairs(cfg.allowedJobs) do
-            if playerJob == allowedJob then jobAllowed = true break end
-        end
-        if not jobAllowed then return false, 'Your job does not allow field repairs' end
-    end
-
-    -- Kit must still be present
-    local itemToConsume = nil
-    if cfg.requireItem then
-        local hasItem, itemName = HasRequiredItem(src, cfg.alternativeItems or {cfg.itemName})
-        if not hasItem then return false, 'Repair kit no longer available' end
-        itemToConsume = itemName
-    end
-
-    local paid, payMsg = ChargeForRepair(src, 'field')
-    if not paid then return false, payMsg or 'Payment failed' end
-
-    if itemToConsume and cfg.consumeItem then
-        RemoveItem(src, itemToConsume)
-    end
-
-    fieldRepairCooldowns[src] = currentTime
+    if not saved then return false, 'Could not save those tones right now.' end
     return true
 end)
 
------------------------------------------------------------
--- PRESET SYSTEM (v2.1.0+)
--- Save, load, delete vehicle configuration presets
------------------------------------------------------------
+---Server-side reader for other resources (dispatch, MDT, a future fleet report).
+---Returns a copy: the cache is ours.
+exports('GetSirenAssignments', function() return sirenAssignments() end)
 
--- Save a preset
-RegisterNetEvent('vehiclemods:server:savePreset')
-AddEventHandler('vehiclemods:server:savePreset', function(presetName, vehicleModel, presetData, isJobPreset)
-    local src = source
-    local identifier = GetPlayerIdentifier(src)
-    local cfg = Config.Presets
-
-    -- This handler had no authorization at all: any connected player, any job,
-    -- anywhere on the map could write rows of arbitrary JSON into vehicle_presets.
-    if not CanModifyVehicles(src) then return end
-
-    -- vehicleModel is indexed with :lower() further down; a non-string threw.
-    if type(vehicleModel) ~= 'string' then return end
-
-    -- presetName was never validated even though Config.ValidateName exists.
-    local okName, nameErr = Config.ValidateName(presetName)
-    if not okName then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Error', description = nameErr or 'Invalid preset name', type = 'error'
-        })
-        return
+CreateThread(function()
+    while GetResourceState('qbx_core') ~= 'started' do Wait(200) end
+    deriveWorkshopJobs()
+    grantAces()
+    MySQL.ready.await() -- the resource being started is not enough: this waits for the connection too
+    if ensureTables() then
+        loadCustomLiveries()
+        loadSirenAssignments()
     end
-
-    -- Bound the payload: presetData was arbitrary client JSON of unbounded size.
-    if type(presetData) ~= 'table' then return end
-    local encoded = json.encode(presetData)
-    if not encoded or #encoded > (cfg.maxPresetBytes or 16384) then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Error', description = 'Preset is too large', type = 'error'
-        })
-        return
-    end
-
-    if not cfg or not cfg.enabled then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Error',
-            description = 'Preset system is disabled',
-            type = 'error'
-        })
-        return
-    end
-
-    local jobPresetName = nil
-    if isJobPreset and cfg.allowJobPresets then
-        local playerJob, playerGrade = GetPlayerJob(src)
-        if playerGrade < cfg.minGradeForJobPresets then
-            TriggerClientEvent('ox_lib:notify', src, {
-                title = 'Error',
-                description = ('Requires grade %d+ to create job presets'):format(cfg.minGradeForJobPresets),
-                type = 'error'
-            })
-            return
-        end
-        jobPresetName = playerJob
-    end
-
-    -- Check preset limits
-    ox_mysql:execute(
-        [[SELECT
-            SUM(CASE WHEN owner_identifier = ? AND job_preset IS NULL THEN 1 ELSE 0 END) AS personal_count,
-            SUM(CASE WHEN job_preset = ? THEN 1 ELSE 0 END) AS job_count
-          FROM vehicle_presets]],
-        {identifier, jobPresetName or ''},
-        function(result)
-            local row = result and result[1]
-            local personalCount = (row and tonumber(row.personal_count)) or 0
-            local jobCount = (row and tonumber(row.job_count)) or 0
-
-            -- Job presets skipped the count check entirely, so maxPresetsPerJob
-            -- was never enforced: unlimited rows via the job-preset branch.
-            -- Both counts come from the single query above; this resource uses
-            -- the callback form of ox_mysql:execute everywhere and nothing else.
-            if isJobPreset and jobPresetName then
-                if jobCount >= (cfg.maxPresetsPerJob or 25) then
-                    TriggerClientEvent('ox_lib:notify', src, {
-                        title = 'Limit Reached',
-                        description = ('Maximum %d job presets allowed'):format(cfg.maxPresetsPerJob or 25),
-                        type = 'error'
-                    })
-                    return
-                end
-            end
-
-            if not isJobPreset and personalCount >= cfg.maxPresetsPerPlayer then
-                TriggerClientEvent('ox_lib:notify', src, {
-                    title = 'Limit Reached',
-                    description = ('Maximum %d personal presets allowed'):format(cfg.maxPresetsPerPlayer),
-                    type = 'error'
-                })
-                return
-            end
-
-            -- Serialize preset data
-            local presetJson = json.encode(presetData)
-
-            -- Insert or update preset
-            ox_mysql:execute([[
-                INSERT INTO vehicle_presets (preset_name, vehicle_model, owner_identifier, job_preset, preset_data)
-                VALUES (?, ?, ?, ?, ?)
-                ON DUPLICATE KEY UPDATE preset_data = VALUES(preset_data), updated_at = CURRENT_TIMESTAMP
-            ]], {presetName, vehicleModel:lower(), identifier, jobPresetName, presetJson}, function(insertResult)
-                if insertResult then
-                    TriggerClientEvent('ox_lib:notify', src, {
-                        title = 'Preset Saved',
-                        description = ('Saved "%s" for %s'):format(presetName, vehicleModel),
-                        type = 'success'
-                    })
-                else
-                    TriggerClientEvent('ox_lib:notify', src, {
-                        title = 'Error',
-                        description = 'Failed to save preset',
-                        type = 'error'
-                    })
-                end
-            end)
-        end
-    )
 end)
 
--- Load presets for a vehicle
-RegisterNetEvent('vehiclemods:server:loadPresets')
-AddEventHandler('vehiclemods:server:loadPresets', function(vehicleModel)
+-----------------------------------------------------------------------
+-- custom liveries (legacy 494-560, 571-745)
+-----------------------------------------------------------------------
+
+RegisterNetEvent('vehiclemods:server:applyCustomLivery', function(netId, modelName, liveryFile)
     local src = source
-
-    -- Read-only, but still gate it: no reason unauthorized jobs should be able
-    -- to enumerate fleet presets, and a bad vehicleModel type threw on :lower().
-    if not IsPlayerAuthorized(src) then return end
-    if type(vehicleModel) ~= 'string' or vehicleModel == '' or #vehicleModel > 64 then return end
-
-    local identifier = GetPlayerIdentifier(src)
-    local playerJob = GetPlayerJob(src)
-
-    -- Get personal and job presets
-    ox_mysql:execute([[
-        SELECT preset_name, preset_data, job_preset, owner_identifier
-        FROM vehicle_presets
-        WHERE vehicle_model = ? AND (owner_identifier = ? OR job_preset = ?)
-        ORDER BY job_preset IS NOT NULL DESC, preset_name ASC
-    ]], {vehicleModel:lower(), identifier, playerJob}, function(result)
-        local presets = {}
-        if result then
-            for _, row in ipairs(result) do
-                table.insert(presets, {
-                    name = row.preset_name,
-                    data = json.decode(row.preset_data),
-                    isJobPreset = row.job_preset ~= nil,
-                    isOwner = row.owner_identifier == identifier
-                })
-            end
+    underLock(src, 'applyCustomLivery', function()
+        if not canWorkshop(src) then return notify(src, 'Access denied', 'You may not modify vehicles.', 'error') end
+        local model = validModel(modelName)
+        if not model then return notify(src, 'Custom livery', 'That vehicle model is not valid.', 'error') end
+        local veh = resolveCallerVehicle(src, netId)
+        if not veh then
+            return notify(src, 'Custom livery', 'That vehicle is not in reach.', 'error')
         end
-        TriggerClientEvent('vehiclemods:client:receivePresets', src, presets)
+        if not vehicleIsModel(veh, model) then
+            return notify(src, 'Custom livery', 'That livery belongs to a different vehicle.', 'error')
+        end
+        if not Workshop.isSafeLiveryFile(liveryFile) then
+            return notify(src, 'Custom livery', 'That livery file is not allowed.', 'error')
+        end
+        -- The broadcast makes every client load a texture dictionary; one a second.
+        local now = GetGameTimer()
+        local last = liveryBroadcasts[src]
+        if last and (now - last) < 1000 then
+            return notify(src, 'Custom livery', 'One livery change a second, please.', 'error')
+        end
+        liveryBroadcasts[src] = now
+        TriggerClientEvent('vehiclemods:client:setCustomLivery', -1, netId, modelName, liveryFile)
+        lib.print.info(('custom livery %s applied to %s (netId %s) by src %s'):format(liveryFile, model, netId, src))
     end)
 end)
 
--- Delete a preset
-RegisterNetEvent('vehiclemods:server:deletePreset')
-AddEventHandler('vehiclemods:server:deletePreset', function(presetName, vehicleModel)
+RegisterNetEvent('vehiclemods:server:clearCustomLivery', function(netId)
     local src = source
-    local identifier = GetPlayerIdentifier(src)
-
-    ox_mysql:execute(
-        'DELETE FROM vehicle_presets WHERE preset_name = ? AND vehicle_model = ? AND owner_identifier = ?',
-        {presetName, vehicleModel:lower(), identifier},
-        function(result)
-            if result and result.affectedRows > 0 then
-                TriggerClientEvent('ox_lib:notify', src, {
-                    title = 'Preset Deleted',
-                    description = ('Deleted "%s"'):format(presetName),
-                    type = 'success'
-                })
-            else
-                TriggerClientEvent('ox_lib:notify', src, {
-                    title = 'Error',
-                    description = 'Preset not found or not owned by you',
-                    type = 'error'
-                })
-            end
-        end
-    )
+    if not canWorkshop(src) then return notify(src, 'Access denied', 'You may not modify vehicles.', 'error') end
+    if not resolveCallerVehicle(src, netId) then
+        return notify(src, 'Custom livery', 'That vehicle is not in reach.', 'error')
+    end
+    TriggerClientEvent('vehiclemods:client:clearCustomLivery', -1, netId)
+    lib.print.info(('custom livery cleared from netId %s by src %s'):format(netId, src))
 end)
 
------------------------------------------------------------
--- LIVERY MEMORY SYSTEM (v2.1.0+)
--- Remember last used livery per vehicle model per player
------------------------------------------------------------
-
--- Save livery selection
-RegisterNetEvent('vehiclemods:server:saveLiveryMemory')
-AddEventHandler('vehiclemods:server:saveLiveryMemory', function(vehicleModel, liveryIndex, liveryMod, customLivery, extras)
+RegisterNetEvent('vehiclemods:server:addCustomLivery', function(modelName, liveryName, liveryFile)
     local src = source
-    local identifier = GetPlayerIdentifier(src)
-    local cfg = Config.AutoApplyLivery
-
-    if not cfg or not cfg.enabled then return end
-
-    -- No authorization and no type check: a client could loop this with random
-    -- model strings and grow player_livery_memory without bound (the UNIQUE key
-    -- is identifier+model, so every new string was a new row).
-    if not IsPlayerAuthorized(src) then return end
-    if type(vehicleModel) ~= 'string' or #vehicleModel == 0 or #vehicleModel > 64 then return end
-
-    -- The client sends the whole ActiveCustomLiveries entry table here, which
-    -- oxmysql cannot bind, and a nil in the middle of the params array leaves a
-    -- hole that mismatches the placeholders. Normalise to a validated string.
-    if type(customLivery) == 'table' then
-        customLivery = customLivery.file
-    end
-    if type(customLivery) ~= 'string' or not IsSafeLiveryFile(customLivery) then
-        customLivery = nil
+    if not canWorkshop(src) then return notify(src, 'Access denied', 'You may not add liveries.', 'error') end
+    local model = validModel(modelName)
+    if not model then return notify(src, 'Custom livery', 'That vehicle model is not valid.', 'error') end
+    local name, nameWhy = validName(liveryName)
+    if not name then return notify(src, 'Custom livery', nameWhy, 'error') end
+    if type(liveryFile) ~= 'string' then return notify(src, 'Custom livery', 'That livery file is not allowed.', 'error') end
+    if not liveryFile:match('%.yft$') then liveryFile = liveryFile .. '.yft' end
+    if not Workshop.isSafeLiveryFile(liveryFile) then
+        return notify(src, 'Custom livery', 'That livery file is not allowed.', 'error')
     end
 
-    local extrasJson = (type(extras) == 'table') and json.encode(extras) or nil
+    underLock(src, 'addCustomLivery', function()
+        local list = liveriesFor(model)
+        if #list >= MAX_LIVERIES_PER_MODEL then
+            return notify(src, 'Custom livery', ('%s already has the maximum of %d custom liveries.'):format(model, MAX_LIVERIES_PER_MODEL), 'error')
+        end
+        for _, entry in ipairs(list) do
+            if entry.name == name then
+                return notify(src, 'Custom livery', ('%s already has a livery called "%s".'):format(model, name), 'error')
+            end
+        end
 
-    ox_mysql:execute([[
-        INSERT INTO player_livery_memory (identifier, vehicle_model, livery_index, livery_mod, custom_livery, extras)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-            livery_index = VALUES(livery_index),
-            livery_mod = VALUES(livery_mod),
-            custom_livery = VALUES(custom_livery),
-            extras = VALUES(extras),
-            updated_at = CURRENT_TIMESTAMP
-    ]], {identifier, vehicleModel:lower(), tonumber(liveryIndex) or -1, tonumber(liveryMod) or -1,
-         customLivery or false, extrasJson or false})
+        -- INSERT IGNORE + the unique key: the database, not this check, decides.
+        local ok, affected = db('addCustomLivery', MySQL.update.await,
+            'INSERT IGNORE INTO custom_liveries (vehicle_model, livery_name, livery_file) VALUES (?, ?, ?)',
+            { model, name, liveryFile })
+        if not ok then return dbFailed(src) end
+        if (tonumber(affected) or 0) == 0 then
+            return notify(src, 'Custom livery', ('%s already has a livery called "%s".'):format(model, name), 'error')
+        end
 
-    if Config.Debug then
-        print(("^2[LIVERY-MEMORY]:^0 Saved for %s: %s (livery: %d, mod: %d, custom: %s)"):format(
-            src, vehicleModel, liveryIndex or -1, liveryMod or -1, customLivery or "none"))
-    end
+        list[#list + 1] = { name = name, file = liveryFile }
+        notify(src, 'Custom livery added', ('"%s" added for %s.'):format(name, model), 'success')
+        lib.print.info(('custom livery "%s" (%s) added for %s by src %s'):format(name, liveryFile, model, src))
+    end)
 end)
 
--- Load livery memory for a vehicle
-RegisterNetEvent('vehiclemods:server:loadLiveryMemory')
-AddEventHandler('vehiclemods:server:loadLiveryMemory', function(vehicleModel)
+RegisterNetEvent('vehiclemods:server:removeCustomLivery', function(modelName, liveryName)
     local src = source
-    local identifier = GetPlayerIdentifier(src)
-    local cfg = Config.AutoApplyLivery
+    if not canWorkshop(src) then return notify(src, 'Access denied', 'You may not remove liveries.', 'error') end
+    local model = validModel(modelName)
+    if not model then return notify(src, 'Custom livery', 'That vehicle model is not valid.', 'error') end
+    if type(liveryName) ~= 'string' or #liveryName == 0 or #liveryName > 255 then
+        return notify(src, 'Custom livery', 'That livery name is not valid.', 'error')
+    end
 
-    if not cfg or not cfg.enabled then return end
-    if not IsPlayerAuthorized(src) then return end
-    if type(vehicleModel) ~= 'string' or #vehicleModel == 0 or #vehicleModel > 64 then return end
-
-    ox_mysql:execute(
-        'SELECT livery_index, livery_mod, custom_livery, extras FROM player_livery_memory WHERE identifier = ? AND vehicle_model = ?',
-        {identifier, vehicleModel:lower()},
-        function(result)
-            if result and result[1] then
-                local memory = result[1]
-                local extras = memory.extras and json.decode(memory.extras) or nil
-                TriggerClientEvent('vehiclemods:client:applyLiveryMemory', src, vehicleModel, {
-                    liveryIndex = memory.livery_index,
-                    liveryMod = memory.livery_mod,
-                    customLivery = memory.custom_livery,
-                    extras = extras
-                })
+    underLock(src, 'removeCustomLivery', function()
+        local function indexOf()
+            for i, entry in ipairs(liveriesFor(model)) do
+                if entry.name == liveryName then return i end
             end
+            return nil
         end
-    )
+
+        if not indexOf() then
+            return notify(src, 'Custom livery', ('%s has no livery called "%s".'):format(model, liveryName), 'error')
+        end
+
+        -- the row goes first: a failed DELETE must not leave the store out of step
+        local ok = db('removeCustomLivery', MySQL.query.await,
+            'DELETE FROM custom_liveries WHERE LOWER(vehicle_model) = ? AND livery_name = ?', { model, liveryName })
+        if not ok then return dbFailed(src) end
+
+        -- the DELETE yields, so the index found before it is stale: look the entry up
+        -- again rather than removing whatever now sits at the old position
+        local at = indexOf()
+        if at then table.remove(liveriesFor(model), at) end
+        notify(src, 'Custom livery removed', ('"%s" removed from %s.'):format(liveryName, model), 'success')
+        lib.print.info(('custom livery "%s" removed from %s by src %s'):format(liveryName, model, src))
+    end)
 end)
 
--- Clear player cooldowns on disconnect
-AddEventHandler('playerDropped', function()
-    local src = source
-    fieldRepairCooldowns[src] = nil
+lib.callback.register('dps-fleet:server:customLiveries', function(source, modelName)
+    if not canWorkshop(source) then return false end
+    local model = validModel(modelName)
+    if not model then return false end
+    return CUSTOM_LIVERIES[model] or {}
 end)
 
------------------------------------------------------------
--- REPAIR COST SYSTEM (v2.1.1+)
--- Charge players for repairs based on config
------------------------------------------------------------
+-----------------------------------------------------------------------
+-- saved vehicle setups (legacy 538-568, 636-665)
+-----------------------------------------------------------------------
 
--- Get player money based on framework
-local function GetPlayerMoney(playerId, moneyType)
-    if currentFramework == 'esx' and frameworkObject then
-        local xPlayer = frameworkObject.GetPlayerFromId(playerId)
-        if xPlayer then
-            if moneyType == 'bank' then
-                return xPlayer.getAccount('bank').money
-            else
-                return xPlayer.getMoney()
-            end
+RegisterNetEvent('vehiclemods:server:saveModifications', function(modelName, props)
+    local src = source
+    underLock(src, 'saveModifications', function()
+        if not canWorkshop(src) then return end
+        local model = validModel(modelName)
+        if not model then return end
+        if type(props) ~= 'table' then return end
+        local encoded = json.encode(props)
+        if type(encoded) ~= 'string' or #encoded > MAX_PROPS_BYTES then
+            return notify(src, 'Vehicle setup', 'That setup is too large to save.', 'error')
         end
-    elseif currentFramework == 'qbcore' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
-            if moneyType == 'bank' then
-                return Player.PlayerData.money.bank
-            else
-                return Player.PlayerData.money.cash
-            end
-        end
-    elseif currentFramework == 'qbox' then
-        -- Discrete qbx_core export (no core object on this build)
-        local Player = exports.qbx_core:GetPlayer(playerId)
-        if Player and Player.PlayerData then
-            if moneyType == 'bank' then
-                return Player.PlayerData.money.bank
-            else
-                return Player.PlayerData.money.cash
-            end
-        end
-    end
-    return 0
-end
 
--- Remove money from player
-local function RemoveMoney(playerId, amount, moneyType)
-    if currentFramework == 'esx' and frameworkObject then
-        local xPlayer = frameworkObject.GetPlayerFromId(playerId)
-        if xPlayer then
-            if moneyType == 'bank' then
-                xPlayer.removeAccountMoney('bank', amount)
-            else
-                xPlayer.removeMoney(amount)
-            end
-            return true
-        end
-    elseif currentFramework == 'qbcore' and frameworkObject then
-        local Player = frameworkObject.Functions.GetPlayer(playerId)
-        if Player then
-            Player.Functions.RemoveMoney(moneyType, amount, 'vehicle-repair')
-            return true
-        end
-    elseif currentFramework == 'qbox' then
-        -- Discrete qbx_core export (no core object on this build)
-        local Player = exports.qbx_core:GetPlayer(playerId)
-        if Player and Player.Functions then
-            Player.Functions.RemoveMoney(moneyType, amount, 'vehicle-repair')
-            return true
-        end
-    end
-    return false
-end
+        local ok = db('saveModifications', MySQL.query.await, [[
+            INSERT INTO vehicle_mods (vehicle_model, extras, player_id) VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE extras = VALUES(extras), player_id = VALUES(player_id)
+        ]], { model, encoded, tostring(citizenidOf(src) or src) })
+        if not ok then return dbFailed(src) end
+        lib.print.info(('vehicle_mods saved for %s by src %s (%d bytes)'):format(model, src, #encoded))
+    end)
+end)
 
--- Check if player's job gets free/discounted repairs
-local function GetRepairDiscount(playerId)
-    local cfg = Config.RepairCosts
-    if not cfg then return 0 end
+lib.callback.register('dps-fleet:server:vehicleConfig', function(source, modelName)
+    if not canWorkshop(source) then return false end
+    local model = validModel(modelName)
+    if not model then return false end
+    local ok, row = db('vehicleConfig', MySQL.single.await,
+        'SELECT extras FROM vehicle_mods WHERE LOWER(vehicle_model) = ? LIMIT 1', { model })
+    if not ok or not row then return false end
+    return decodeJson(row.extras) or false
+end)
 
-    local playerJob = GetPlayerJob(playerId)
-    if not playerJob then return 0 end
+-----------------------------------------------------------------------
+-- presets (legacy 985-1175)
+-- personal presets belong to a citizenid, job presets to a job name.
+-----------------------------------------------------------------------
 
-    -- Check free jobs
-    if cfg.freeForJobs then
-        for _, job in ipairs(cfg.freeForJobs) do
-            if playerJob == job then
-                return 1.0 -- 100% discount (free)
-            end
-        end
+RegisterNetEvent('vehiclemods:server:savePreset', function(presetName, modelName, presetData, isJob)
+    local src = source
+    if not canWorkshop(src) then return end
+    local model = validModel(modelName)
+    if not model then return end
+    local name, nameWhy = validName(presetName)
+    if not name then return notify(src, 'Preset', nameWhy, 'error') end
+    if type(presetData) ~= 'table' then return notify(src, 'Preset', 'There is nothing to save.', 'error') end
+
+    local encoded = json.encode(presetData)
+    local maxBytes = (Config.Presets and Config.Presets.maxPresetBytes) or 16384
+    if type(encoded) ~= 'string' or #encoded > maxBytes then
+        return notify(src, 'Preset', 'That preset is too large.', 'error')
     end
 
-    -- Check discount jobs
-    if cfg.discountJobs then
-        for _, discountInfo in ipairs(cfg.discountJobs) do
-            if playerJob == discountInfo.job then
-                return discountInfo.discount or 0
-            end
-        end
+    local identifier = citizenidOf(src)
+    if not identifier then return notify(src, 'Preset', 'Your character is not loaded yet.', 'error') end
+    local jobName, grade = playerJob(src)
+
+    local kind = isJob == true and 'job' or 'personal'
+    local jobPreset
+    if kind == 'job' then
+        if not jobName then return notify(src, 'Preset', 'You have no job to share a preset with.', 'error') end
+        jobPreset = jobName
     end
 
-    return 0
-end
-
--- Charge a player for a repair. Cost is derived SERVER-SIDE from config (never
--- trusted from the client); free jobs and job discounts apply. Returns
--- (ok:boolean, msg:string|nil). Shared by the repair callback below and the
--- field-repair flow.
-function ChargeForRepair(src, repairType)  -- resource-global: field repair (defined earlier in the file) calls this at runtime
-    local cfg = Config.RepairCosts
-
-    -- Repair costs disabled -> free
-    if not cfg or not cfg.enabled then
-        return true
-    end
-
-    local serverCostByType = {
-        full = cfg.fullRepairCost or 0,
-        emergency = cfg.emergencyRepairCost or 0,
-        field = cfg.fieldRepairCost or 0
-    }
-    local baseCost = serverCostByType[repairType]
-    if baseCost == nil then
-        return false, 'Invalid repair type'
-    end
-
-    -- jg-scripts compatibility (defer to jg-mechanic for repairs).
-    -- Disabled in config on DPS: no jg resources installed.
-    local jgCompat = Config.Compatibility and Config.Compatibility['jg-scripts']
-    if jgCompat and jgCompat.enabled and jgCompat.deferToMechanicForRepairs then
-        return true
-    end
-
-    local discount = GetRepairDiscount(src)
-    local finalCost = math.floor(baseCost * (1 - discount))
-
-    if finalCost <= 0 then
-        return true
-    end
-
-    local chargeFrom = cfg.chargeFrom or 'bank'
-    local success = false
-    local chargedFrom = nil
-
-    if chargeFrom == 'both' then
-        -- Try bank first, then cash
-        local bankMoney = GetPlayerMoney(src, 'bank')
-        if bankMoney >= finalCost then
-            success = RemoveMoney(src, finalCost, 'bank')
-            chargedFrom = 'bank'
+    underLock(src, 'savePreset', function()
+        local countOk, countRow
+        if kind == 'job' then
+            countOk, countRow = db('savePreset count', MySQL.single.await,
+                'SELECT COUNT(*) AS n FROM vehicle_presets WHERE job_preset = ?', { jobPreset })
         else
-            local cashMoney = GetPlayerMoney(src, 'cash')
-            if cashMoney >= finalCost then
-                success = RemoveMoney(src, finalCost, 'cash')
-                chargedFrom = 'cash'
-            end
+            countOk, countRow = db('savePreset count', MySQL.single.await,
+                'SELECT COUNT(*) AS n FROM vehicle_presets WHERE owner_identifier = ? AND job_preset IS NULL', { identifier })
         end
-    else
-        local money = GetPlayerMoney(src, chargeFrom)
-        if money >= finalCost then
-            success = RemoveMoney(src, finalCost, chargeFrom)
-            chargedFrom = chargeFrom
-        end
+        if not countOk then return dbFailed(src) end
+        local count = countRow and tonumber(countRow.n) or 0
+
+        local allowed, why = Workshop.presetAllowed(kind, count, grade or 0, Config)
+        if not allowed then return notify(src, 'Preset', why or 'That preset is not allowed.', 'error') end
+
+        -- NULLIF keeps job_preset NULL for a personal preset without binding a nil
+        -- in the middle of the parameter list (oxmysql leaves a hole there).
+        local ok = db('savePreset', MySQL.query.await, [[
+            INSERT INTO vehicle_presets (preset_name, vehicle_model, owner_identifier, job_preset, preset_data)
+            VALUES (?, ?, ?, NULLIF(?, ''), ?)
+            ON DUPLICATE KEY UPDATE preset_data = VALUES(preset_data), job_preset = VALUES(job_preset),
+                updated_at = CURRENT_TIMESTAMP
+        ]], { name, model, identifier, jobPreset or '', encoded })
+        if not ok then return dbFailed(src) end
+        notify(src, 'Preset saved', ('"%s" saved for %s.'):format(name, model), 'success')
+        lib.print.info(('%s preset "%s" saved for %s by %s (src %s, %d bytes)'):format(kind, name, model, identifier, src, #encoded))
+    end)
+end)
+
+lib.callback.register('dps-fleet:server:presets', function(source, modelName)
+    if not canWorkshop(source) then return false end
+    local model = validModel(modelName)
+    if not model then return false end
+    local identifier = citizenidOf(source)
+    if not identifier then return false end
+    local jobName = playerJob(source)
+
+    local ok, rows = db('presets', MySQL.query.await, [[
+        SELECT preset_name, preset_data, job_preset, owner_identifier
+        FROM vehicle_presets
+        WHERE LOWER(vehicle_model) = ? AND (owner_identifier = ? OR job_preset = ?)
+        ORDER BY job_preset IS NOT NULL DESC, preset_name ASC
+    ]], { model, identifier, jobName or '' })
+    if not ok then return false end
+
+    local out = {}
+    for _, row in ipairs(rows or {}) do
+        local isJob = row.job_preset ~= nil
+        out[#out + 1] = {
+            name = row.preset_name,
+            data = decodeJson(row.preset_data),
+            isJob = isJob,
+            isJobPreset = isJob, -- client/workshop.lua reads isJobPreset for the [Fleet] tag
+            isOwner = row.owner_identifier == identifier,
+        }
+    end
+    return out
+end)
+
+RegisterNetEvent('vehiclemods:server:deletePreset', function(presetName, modelName)
+    local src = source
+    if not canWorkshop(src) then return end
+    local model = validModel(modelName)
+    if not model then return end
+    if type(presetName) ~= 'string' or #presetName == 0 or #presetName > 100 then
+        return notify(src, 'Preset', 'That preset name is not valid.', 'error')
+    end
+    local identifier = citizenidOf(src)
+    if not identifier then return notify(src, 'Preset', 'Your character is not loaded yet.', 'error') end
+    local jobName, grade = playerJob(src)
+
+    local found, row = db('deletePreset lookup', MySQL.single.await, [[
+        SELECT id, owner_identifier, job_preset FROM vehicle_presets
+        WHERE preset_name = ? AND LOWER(vehicle_model) = ? AND (owner_identifier = ? OR job_preset = ?)
+        LIMIT 1
+    ]], { presetName, model, identifier, jobName or '' })
+    if not found then return dbFailed(src) end
+    if not row then
+        return notify(src, 'Preset', ('%s has no preset called "%s".'):format(model, presetName), 'error')
     end
 
-    if success then
-        TriggerClientEvent('ox_lib:notify', src, {
-            title = 'Repair Payment',
-            description = ('$%d charged from %s'):format(finalCost, chargedFrom),
-            type = 'success',
-            duration = 3000
-        })
-        if Config.Debug then
-            print(("^2[REPAIR-COST]:^0 Player %s charged $%d for %s repair"):format(src, finalCost, repairType))
-        end
+    local minGrade = (Config.Presets and Config.Presets.minGradeForJobPresets) or 0
+    local isOwner = row.owner_identifier == identifier
+    local canDeleteJobPreset = row.job_preset ~= nil and row.job_preset == jobName and (grade or 0) >= minGrade
+    if not (isOwner or canDeleteJobPreset) then
+        return notify(src, 'Preset', ('Only the owner or grade %d and above can delete that preset.'):format(minGrade), 'error')
+    end
+
+    local ok = db('deletePreset', MySQL.query.await, 'DELETE FROM vehicle_presets WHERE id = ?', { row.id })
+    if not ok then return dbFailed(src) end
+    notify(src, 'Preset deleted', ('"%s" deleted.'):format(presetName), 'success')
+    lib.print.info(('preset "%s" (%s) deleted by %s (src %s)'):format(presetName, model, identifier, src))
+end)
+
+-----------------------------------------------------------------------
+-- livery memory (legacy 1177-1245)
+-----------------------------------------------------------------------
+
+RegisterNetEvent('vehiclemods:server:saveLiveryMemory', function(modelName, liveryIndex, liveryMod, customLivery, extras)
+    local src = source
+    underLock(src, 'saveLiveryMemory', function()
+        if not canWorkshop(src) then return end
+        local cfg = Config.AutoApplyLivery
+        if not cfg or not cfg.enabled then return end
+        local model = validModel(modelName)
+        if not model then return end
+        local identifier = citizenidOf(src)
+        if not identifier then return end
+
+        -- the client sends the whole ActiveCustomLiveries entry here; keep the file only
+        if type(customLivery) == 'table' then customLivery = customLivery.file end
+        if type(customLivery) ~= 'string' or not Workshop.isSafeLiveryFile(customLivery) then customLivery = nil end
+        local extrasJson = type(extras) == 'table' and json.encode(extras) or nil
+
+        local ok = db('saveLiveryMemory', MySQL.query.await, [[
+            INSERT INTO player_livery_memory (identifier, vehicle_model, livery_index, livery_mod, custom_livery, extras)
+            VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
+            ON DUPLICATE KEY UPDATE
+                livery_index = VALUES(livery_index),
+                livery_mod = VALUES(livery_mod),
+                custom_livery = VALUES(custom_livery),
+                extras = VALUES(extras),
+                updated_at = CURRENT_TIMESTAMP
+        ]], { identifier, model, tonumber(liveryIndex) or -1, tonumber(liveryMod) or -1,
+              customLivery or '', extrasJson or '' })
+        if not ok then return dbFailed(src) end
+        lib.print.info(('livery memory saved for %s on %s (livery %s, mod %s, custom %s)'):format(
+            identifier, model, tostring(tonumber(liveryIndex) or -1), tostring(tonumber(liveryMod) or -1), customLivery or 'none'))
+    end)
+end)
+
+lib.callback.register('dps-fleet:server:liveryMemory', function(source, modelName)
+    if not canWorkshop(source) then return false end
+    local cfg = Config.AutoApplyLivery
+    if not cfg or not cfg.enabled then return false end
+    local model = validModel(modelName)
+    if not model then return false end
+    local identifier = citizenidOf(source)
+    if not identifier then return false end
+
+    local ok, row = db('liveryMemory', MySQL.single.await, [[
+        SELECT livery_index, livery_mod, custom_livery, extras FROM player_livery_memory
+        WHERE identifier = ? AND LOWER(vehicle_model) = ?
+    ]], { identifier, model })
+    if not ok or not row then return false end
+    return {
+        liveryIndex = tonumber(row.livery_index) or -1,
+        liveryMod = tonumber(row.livery_mod) or -1,
+        customLivery = row.custom_livery,
+        extras = decodeJson(row.extras),
+    }
+end)
+
+-----------------------------------------------------------------------
+-- repairs (legacy 879-990 field repair, 1436-1460 charging)
+-- The price is always derived server-side from Config; the client never sends one.
+-----------------------------------------------------------------------
+
+lib.callback.register('dps-fleet:server:repairQuote', function(source)
+    if not canWorkshop(source) then return false end
+    local jobName = playerJob(source)
+    return {
+        emergency = Workshop.repairPrice('emergency', jobName, Config),
+        full = Workshop.repairPrice('full', jobName, Config),
+        field = Workshop.repairPrice('field', jobName, Config),
+    }
+end)
+
+---@param src number
+---@param kind string 'full'|'emergency'|'field'
+---@return boolean ok, string|nil reason
+local function chargeRepair(src, kind)
+    if not REPAIR_KINDS[kind] then return false, 'That repair type does not exist.' end
+    local rc = Config.RepairCosts
+    if not rc or rc.enabled == false then return true end
+
+    local jobName = playerJob(src)
+    local price = Workshop.repairPrice(kind, jobName, Config)
+    if price <= 0 then
+        lib.print.info(('%s repair free for src %s (job %s)'):format(kind, src, jobName or 'none'))
         return true
     end
 
-    return false, ('Insufficient funds. Need $%d'):format(finalCost)
+    local player = exports.qbx_core:GetPlayer(src)
+    if not player then return false, 'Your character is not loaded yet.' end
+    local bank = tonumber(player.Functions.GetMoney('bank')) or 0
+    local cash = tonumber(player.Functions.GetMoney('cash')) or 0
+
+    local plan = Workshop.chargePlan(price, bank, cash, rc.chargeFrom or 'bank')
+    if not plan then return false, ('Not enough money — $%d needed.'):format(price) end
+    if plan.amount > 0 and not player.Functions.RemoveMoney(plan.account, plan.amount, 'fleet-repair') then
+        return false, 'The payment did not go through.'
+    end
+    notify(src, 'Repair payment', ('$%d charged from %s.'):format(plan.amount, plan.account), 'success')
+    lib.print.info(('%s repair charged $%d from %s for src %s (job %s)'):format(kind, plan.amount, plan.account, src, jobName or 'none'))
+    return true
 end
 
--- ox_lib callback the client awaits before starting Emergency/Full repair.
--- (Replaces the old 'vehiclemods:server:chargeRepair' net event + the
--- 'repairPaymentResult' reply event, which the client never actually used —
--- repairs had been silently free.)
-lib.callback.register('vehiclemods:server:chargeRepair', function(src, repairType)
-    if not CanModifyVehicles(src) then
-        return false, 'You are not authorized to repair vehicles here.'
+-- The panel's repair button, and only the workshop repairs it pays for. 'field' is
+-- refused here: a field repair has a gate in front of it (repair kit, cooldown,
+-- allowed job, minimum grade) and the fieldRepair callback below is the only way
+-- through it — it calls chargeRepair('field') itself once the gate has passed.
+lib.callback.register('dps-fleet:server:chargeRepair', function(source, kind)
+    if not canWorkshop(source) then return false, 'You may not repair vehicles here.' end
+    if kind ~= 'full' and kind ~= 'emergency' then return false, 'That repair type does not exist.' end
+    return chargeRepair(source, kind)
+end)
+
+lib.callback.register('dps-fleet:server:fieldRepair', function(source)
+    local src = source
+    if not canWorkshop(src) then return false, 'You may not repair vehicles here.' end
+    local cfg = Config.FieldRepair
+    if not cfg or not cfg.enabled then return false, 'Field repair is switched off.' end
+
+    -- The cooldown belongs to the character, so a reconnect does not clear it.
+    local identifier = citizenidOf(src)
+    if not identifier then return false, 'Your character is not loaded yet.' end
+
+    local now = os.time()
+    local cooldown = math.floor((tonumber(cfg.cooldown) or 0) / 1000)
+    local last = fieldRepairCooldowns[identifier]
+    if last and (now - last) < cooldown then
+        return false, ('Field repair is on cooldown for another %d seconds.'):format(cooldown - (now - last))
     end
-    -- No type guard needed: ChargeForRepair's cost-table lookup rejects any
-    -- non-matching repairType with the same (false, 'Invalid repair type').
-    return ChargeForRepair(src, repairType)
+
+    local jobName, grade = playerJob(src)
+    local jobs = cfg.allowedJobs or {}
+    if #jobs > 0 then
+        local jobOk = false
+        for _, name in ipairs(jobs) do
+            if name == jobName then jobOk = true; break end
+        end
+        if not jobOk then return false, 'Your job does not do field repairs.' end
+    end
+    local minGrade = tonumber(cfg.minGrade) or 0
+    if minGrade > 0 and (grade or 0) < minGrade then
+        return false, ('Field repair needs job grade %d or higher.'):format(minGrade)
+    end
+
+    local item
+    if cfg.requireItem then
+        if GetResourceState('ox_inventory') ~= 'started' then return false, 'The inventory is not running.' end
+        for _, name in ipairs(cfg.alternativeItems or { cfg.itemName }) do
+            local ok, count = pcall(function() return exports.ox_inventory:Search(src, 'count', name) end)
+            if ok and (tonumber(count) or 0) > 0 then item = name; break end
+        end
+        if not item then return false, 'You need a repair kit for that.' end
+    end
+
+    local paid, why = chargeRepair(src, 'field')
+    if not paid then return false, why or 'The payment did not go through.' end
+
+    if item and cfg.consumeItem then exports.ox_inventory:RemoveItem(src, item, 1) end
+    fieldRepairCooldowns[identifier] = now
+    lib.print.info(('field repair approved for src %s (job %s, grade %s, kit %s)'):format(
+        src, jobName or 'none', tostring(grade or 0), item or 'none'))
+    return true
 end)
 
-
--- Character switch (logout without disconnect) must also drop the job cache;
--- source ids survive multichar switches, so a stale entry would gate the new
--- character with the old character's job. Same bug class as dps-towjob 2026-08-22.
--- Character-switch (multichar) cache invalidation. NO RegisterNetEvent: these are
--- server-internal framework events; net-registering one would let any client forge a
--- logout for an arbitrary player id server-wide. AddEventHandler alone receives the
--- genuine server-side trigger.
-AddEventHandler('QBCore:Server:OnPlayerUnload', function(src)
-    if type(src) == 'number' then InvalidatePlayerJobCache(src) end
-end)
-AddEventHandler('qbx_core:server:playerLoggedOut', function(src)
-    if type(src) == 'number' then InvalidatePlayerJobCache(src) end
+-- fieldRepairCooldowns is keyed on the citizenid and is not cleared here: that is
+-- the point of it, and a five-minute entry per character is nothing.
+AddEventHandler('playerDropped', function()
+    busy[source] = nil
+    liveryBroadcasts[source] = nil
 end)
 
+-----------------------------------------------------------------------
+-- ── trunk gear ──  (Task 7b, DPS 2026-09-28)
+-- Vehiclegear 1.1.5-dps1 folded in: original by Lapertaja (CC BY-NC-SA 4.0,
+-- docs/licenses/vehiclegear.txt), DPS fork by DaemonAlex. The client half is
+-- client/gear.lua; the rule is Gear.* in shared/workshop.lua.
+--
+-- The fork's server half took a plate and an item name off the client and moved
+-- items in and out of that trunk on trust. Here every call re-derives everything:
+-- the job (Gear.jobAllowed over the workshop set), the vehicle the caller claims
+-- (resolveCallerVehicle: a real vehicle within 10 m), the department kit that
+-- vehicle carries, and the gear key inside it. GEAR_OUT counts what each player
+-- has taken so a "put it back" call cannot mint items that were never taken.
+-----------------------------------------------------------------------
 
--- lets the client skip zone/vehicle-class prompts for admins; server-side
--- checks above stay authoritative either way
-lib.callback.register('dps-EVM:server:isAdmin', function(source)
-    return IsPlayerAceAllowed(source, 'command') == true
+local GEAR_BY_HASH = nil   -- model hash (unsigned) -> { model, dept, gear, set }
+local GEAR_OUT = {}        -- src -> { [gearKey] = count taken and not yet returned }
+
+---Built on first use, because data/emergency.json is read in the start-up thread.
+---@return table
+local function gearIndex()
+    if GEAR_BY_HASH and next(GEAR_BY_HASH) then return GEAR_BY_HASH end
+    GEAR_BY_HASH = {}
+    local n = 0
+    for model, entry in pairs(Gear.buildIndex(Config, EMERGENCY)) do
+        GEAR_BY_HASH[joaat(model) % 0x100000000] = entry
+        n = n + 1
+    end
+    if n > 0 then lib.print.info(('trunk gear: %d models carry a department kit'):format(n)) end
+    return GEAR_BY_HASH
+end
+
+---The department map and the workshop job set, for client/gear.lua's target options.
+---Read-only and not sensitive: every allowed job needs it, not just ace holders.
+lib.callback.register('dps-fleet:server:emergencyIndex', function()
+    local jobs = {}
+    for name in pairs(workshopJobSet()) do jobs[#jobs + 1] = name end
+    table.sort(jobs)
+    return EMERGENCY, jobs
+end)
+
+---Everything a gear call needs, all of it re-derived server-side.
+---@param src number
+---@param netId any
+---@param key any
+---@return table|nil ctx { veh, entry, def, key, jobName }, string|nil reason
+local function gearContext(src, netId, key)
+    local tg = Config.TrunkGear
+    if not tg or tg.enabled == false then return nil, 'Trunk gear is switched off.' end
+    if type(key) ~= 'string' or #key == 0 or #key > 40 then return nil, 'Unknown gear.' end
+
+    local def = type(tg.Gear) == 'table' and tg.Gear[key] or nil
+    if type(def) ~= 'table' then return nil, 'That gear does not exist.' end
+
+    local jobName = playerJob(src)
+    if not Gear.jobAllowed(jobName, Config, workshopJobSet()) then
+        return nil, (tg.Translation and tg.Translation.no_job) or 'Your job does not carry that gear.'
+    end
+
+    local veh = resolveCallerVehicle(src, netId)
+    if not veh then return nil, 'Stand at that vehicle.' end
+
+    local entry = gearIndex()[GetEntityModel(veh) % 0x100000000]
+    if not entry or not entry.set[key] then return nil, 'That vehicle does not carry that gear.' end
+    if not Gear.deptAllowed(jobName, entry.dept, Config) then
+        return nil, (tg.Translation and tg.Translation.wrong_dept) or "That is another department's gear."
+    end
+
+    return { veh = veh, entry = entry, def = def, key = key, jobName = jobName }
+end
+
+---The ox_inventory trunk of a vehicle, by the plate the server reads off it.
+---ox_inventory keys trunks 'trunk<plate>' with inventory:trimplate on (ox.cfg).
+---@param veh number
+---@return table|nil inventory
+local function trunkOf(veh)
+    if GetResourceState('ox_inventory') ~= 'started' then return nil end
+    local plate = qbx.getVehiclePlate(veh)
+    if type(plate) ~= 'string' then return nil end
+    plate = plate:match('^%s*(.-)%s*$') or ''
+    if plate == '' then return nil end
+    local ok, inv = pcall(function() return exports.ox_inventory:GetInventory('trunk' .. plate, false) end)
+    if not ok or type(inv) ~= 'table' then return nil end
+    return inv
+end
+
+---@param inv table
+---@param item string
+---@return number count
+local function countIn(inv, item)
+    local ok, count = pcall(function() return exports.ox_inventory:GetItemCount(inv, item) end)
+    if not ok then return 0 end
+    return tonumber(count) or 0
+end
+
+---The ox_inventory item this piece of gear involves, or nil when it involves none.
+---@param def table
+---@return string|nil item
+local function gearItem(def)
+    return type(def.item) == 'string' and def.item ~= '' and def.item or nil
+end
+
+---Whether that item has to be in this trunk first. Gear of kind `give` is an item
+---handed to the player, so it always comes out of the trunk — otherwise the take
+---would mint one. Config.TrunkGear.RequireItems only relaxes worn gear (vest,
+---helmet, turnout coat), which is clothing on the ped and not an item at all.
+---@param def table
+---@return string|nil item
+local function trunkItem(def)
+    if def.give then return gearItem(def) end
+    if Config.TrunkGear.RequireItems ~= true then return nil end
+    return gearItem(def)
+end
+
+---Is this gear there for the taking? Asked before the progress circle runs, so a
+---player is not made to work for a trunk that has nothing in it.
+lib.callback.register('dps-fleet:server:gearCheck', function(source, netId, key)
+    local ctx, reason = gearContext(source, netId, key)
+    if not ctx then return false, reason end
+    local tr = Config.TrunkGear.Translation or {}
+
+    local fromTrunk = trunkItem(ctx.def)
+    if fromTrunk then
+        local trunk = trunkOf(ctx.veh)
+        if not trunk or countIn(trunk, fromTrunk) < 1 then return false, tr.not_in_trunk or 'That is not in the trunk.' end
+    end
+    if ctx.def.give then
+        local item = gearItem(ctx.def)
+        local ok, canCarry = pcall(function() return exports.ox_inventory:CanCarryItem(source, item, 1) end)
+        if not ok or not canCarry then return false, tr.no_room or 'You have no room for that.' end
+    end
+    return true
+end)
+
+---Take it: the item leaves the trunk here and only here. Gear marked `give` lands
+---in the player's inventory; everything else is worn, so the item is consumed.
+lib.callback.register('dps-fleet:server:gearTake', function(source, netId, key)
+    local ctx, reason = gearContext(source, netId, key)
+    if not ctx then return false, reason end
+    local tr = Config.TrunkGear.Translation or {}
+
+    local item = gearItem(ctx.def)
+    local fromTrunk = trunkItem(ctx.def)
+    if fromTrunk then
+        local trunk = trunkOf(ctx.veh)
+        if not trunk or countIn(trunk, fromTrunk) < 1 then return false, tr.not_in_trunk or 'That is not in the trunk.' end
+
+        local removed, result = pcall(function() return exports.ox_inventory:RemoveItem(trunk, fromTrunk, 1) end)
+        if not removed or result == false then return false, tr.failed or 'That did not work.' end
+    end
+
+    if ctx.def.give and item then
+        local added, result = pcall(function() return exports.ox_inventory:AddItem(source, item, 1) end)
+        if not added or result == false then
+            -- straight back where it came from, so a full inventory costs nothing
+            if fromTrunk then
+                local trunk = trunkOf(ctx.veh)
+                if trunk then pcall(function() return exports.ox_inventory:AddItem(trunk, fromTrunk, 1) end) end
+            end
+            return false, tr.no_room or 'You have no room for that.'
+        end
+    end
+
+    local out = GEAR_OUT[source] or {}
+    out[key] = (out[key] or 0) + 1
+    GEAR_OUT[source] = out
+    lib.print.info(('trunk gear: src %s (job %s) took %s off %s'):format(source, ctx.jobName or 'none', key, ctx.entry.model))
+    return true
+end)
+
+---Put it back. Only a piece this player actually took can come back, so the call
+---cannot be used to mint items. `give` gear stays with the player: there is nothing
+---to return.
+lib.callback.register('dps-fleet:server:gearStow', function(source, netId, key)
+    local ctx, reason = gearContext(source, netId, key)
+    if not ctx then return false, reason end
+    local tr = Config.TrunkGear.Translation or {}
+
+    local out = GEAR_OUT[source]
+    if not out or (out[key] or 0) < 1 then return false, tr.failed or 'That did not work.' end
+
+    local item = trunkItem(ctx.def)
+    if item and not ctx.def.give then
+        local trunk = trunkOf(ctx.veh)
+        if not trunk then return false, tr.not_returned or 'It would not go back in the trunk.' end
+        local ok, result = pcall(function() return exports.ox_inventory:AddItem(trunk, item, 1) end)
+        if not ok or result == false then return false, tr.not_returned or 'It would not go back in the trunk.' end
+    end
+
+    out[key] = out[key] - 1
+    lib.print.info(('trunk gear: src %s (job %s) put %s back in %s'):format(source, ctx.jobName or 'none', key, ctx.entry.model))
+    return true
+end)
+
+AddEventHandler('playerDropped', function()
+    GEAR_OUT[source] = nil
 end)

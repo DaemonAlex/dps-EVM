@@ -1,3553 +1,458 @@
--- Framework variables
-ESX = nil
-QBCore = nil
+--[[
+    dps-carmenu client  (Qbox native: qbx registry export, ox_lib cache, lib.callback)
+    F7 or /carmenu opens the fleet panel: a floating search bar with the grouped list
+    under it. Search, grouping and card text are Lua (shared/search.lua) so the panel
+    is a view and the logic stays testable.
 
-AddEventHandler('onClientResourceStart', function(resourceName)
-    if GetCurrentResourceName() ~= resourceName then return end
+    Performance: no CreateThread loops. Everything is event or callback driven; the
+    only deferred work is a one-shot timer after a spawn. Model natives run only after
+    a selection rests (the panel debounces) and the model is released right after.
+]]
 
-    if not Config then
-        print("^1CRITICAL ERROR:^0 Config not loaded!")
-        return
-    end
+local isOpen = false
+local startMode = 'browse'
+local ALL = {}            -- rows: model, name, brand, category, type, price, pack, cls, make, dept, kind, photo, speed, seats
+local BY_MODEL = {}
+local BY_HASH = {}        -- unsigned model hash -> spawn code, so a live vehicle names itself
+local hashIndexed = false -- BY_HASH holds the whole registry, not just an open panel's rows
+local wsVehicle = nil     -- the vehicle the workshop is working on, re-resolved on every call
+local wsModel = nil       -- its model name, kept so the last-spawned fallback still works
+local INFO = {}           -- model -> model-native info, read once per session
+local HANDLING = {}       -- model -> last handling record read from a live vehicle
+local lastSpawned = nil   -- { netId, model }
+local serverData = nil    -- packs / classes / emergency / photos from the server, once per session
 
-    -- Initialize auto-configuration
-    Config.Initialize()
-    
-    local framework = Config.Framework
+local KVP_RECENT, KVP_FAV = 'dps_carmenu_recent', 'dps_carmenu_fav'
+local RECENT_MAX = 15
 
-    if framework == 'esx' then
-        ESX = exports['es_extended']:getSharedObject()
-        print("^2INFO:^0 ESX initialized")
-    elseif framework == 'qbcore' then
-        -- Legacy QB-Core only. (The old qbx_core branch here called the
-        -- qb-core export against the wrong resource — on a qbx box the
-        -- framework detects as 'qbox' and never lands here.)
-        if GetResourceState('qb-core') == 'started' then
-            QBCore = exports['qb-core']:GetCoreObject()
-            print("^2INFO:^0 QBCore initialized")
-        else
-            print("^3WARN:^0 Framework set to qbcore but qb-core is not started")
-        end
-    elseif framework == 'qbox' then
-        -- QBox uses exports directly, no need to get core object
-        print("^2INFO:^0 QBox framework detected")
-    end
+-- ── small helpers ──────────────────────────────────────────────────────────────
 
-    print("^2SUCCESS:^0 Vehicle Modification System client initialized with " .. framework .. " framework")
-    
-    if Config.Debug then
-        print("^2[AUTO-CONFIG]:^0 Client configuration completed")
-        print("^2[AUTO-CONFIG]:^0 Zones available: " .. #Config.ModificationZones)
-        print("^2[AUTO-CONFIG]:^0 Modifications enabled: " .. (Config.EnabledModifications and "Yes" or "No"))
-    end
-end)
-
-if not Config then
-    print("^1ERROR:^0 Config is not loaded! Check fxmanifest.lua.")
-    return
+local function loadList(key)
+    local raw = GetResourceKvpString(key)
+    if not raw then return {} end
+    local ok, t = pcall(json.decode, raw)
+    if not ok or type(t) ~= 'table' then return {} end
+    return t
 end
 
--- Performance optimization variables
-local TEXTURE_LOAD_TIMEOUT = 300
-local loadedTextures = {}
+local function saveList(key, t) SetResourceKvp(key, json.encode(t)) end
 
--- /evm opens the menu. All authorization (job, zone, emergency-class, admin
--- bypass) lives in the openVehicleModMenu event handler + server callbacks —
--- the command adds no checks of its own, so every entry path behaves the same.
-RegisterCommand('evm', function()
-    TriggerEvent('vehiclemods:client:openVehicleModMenu')
-end, false)
-
--- Keybind stays unbound by default: F7 belongs to klb_exhaustaudio, and EVM is
--- contextual (target the vehicle via ox_target). /evm is bindable by hand in
--- FiveM's keybind settings for anyone who prefers a key.
-RegisterKeyMapping('evm', 'Open Emergency Vehicle Menu (EVM)', 'keyboard', '')
-
--- Initialize variables
-ActiveCustomLiveries = {}
-
--- The vehicle the menu was opened for. Set by openVehicleModMenu after the
--- server-side auth gate. Submenus MUST use GetMenuVehicle() instead of
--- GetVehiclePedIsIn: when the menu is reached on foot via ox_target,
--- GetVehiclePedIsIn returns 0 and every submenu used to error with
--- "You need to be in a vehicle".
-local MenuVehicle = 0
-
--- Admin (ace 'command') status is static for the session — cache the first
--- answer instead of a server round trip on every non-emergency target.
-local isAdminCache = nil
-local function IsAdminCached()
-    if isAdminCache == nil then
-        isAdminCache = lib.callback.await('dps-EVM:server:isAdmin', false) == true
-    end
-    return isAdminCache
+local function pushRecent(model)
+    local list = loadList(KVP_RECENT)
+    for i = #list, 1, -1 do if list[i] == model then table.remove(list, i) end end
+    table.insert(list, 1, model)
+    while #list > RECENT_MAX do table.remove(list) end
+    saveList(KVP_RECENT, list)
+    return list
 end
 
-function GetMenuVehicle()
-    -- The vehicle the player is IN always wins (review catch: a lingering menu
-    -- subject must never beat the car you're actually sitting in); the stored
-    -- menu subject only covers the on-foot ox_target flow.
-    local veh = GetVehiclePedIsIn(PlayerPedId(), false)
-    if veh ~= 0 then return veh end
-    if MenuVehicle ~= 0 and DoesEntityExist(MenuVehicle) then
-        return MenuVehicle
-    end
-    return 0
+local function favList() return loadList(KVP_FAV) end
+local function isFav(model)
+    for _, m in ipairs(favList()) do if m == model then return true end end
+    return false
 end
 
--- Zone feature removed entirely (Damon 2026-08-22): access is JOB-gated
--- (police/fire/EMS via server checks). No zone blips, no zone scanning.
+local function notify(description, kind)
+    lib.notify({ title = 'DPS Fleet', description = description, type = kind or 'inform' })
+end
 
--- (zone scanner thread removed with the zone feature)
+local CLASS_NAMES = { [0] = 'Compacts', 'Sedans', 'SUVs', 'Coupes', 'Muscle', 'Sports Classics', 'Sports', 'Super', 'Motorcycles', 'Off-road',
+    'Industrial', 'Utility', 'Vans', 'Cycles', 'Boats', 'Helicopters', 'Planes', 'Service', 'Emergency', 'Military', 'Commercial', 'Trains', 'Open Wheel' }
 
--- Main menu event
-RegisterNetEvent('vehiclemods:client:openVehicleModMenu')
-AddEventHandler('vehiclemods:client:openVehicleModMenu', function(targetVehicle)
-    -- SERVER-SIDE AUTHORIZATION GATE (single choke point for every entry path:
-    -- /modveh command, F7 keybind, auto-open zone thread, and submenu re-opens).
-    -- The server re-checks emergency job + real zone distance; the client cannot
-    -- bypass this by triggering the event directly.
-    local canAccess, denyMsg = lib.callback.await('vehiclemods:server:canAccessMenu', false)
-    if not canAccess then
-        lib.notify({
-            title = 'Access Denied',
-            description = denyMsg or 'You are not authorized to use vehicle modifications.',
-            type = 'error',
-            duration = 5000
-        })
-        return
+-- ── vehicle facts ──────────────────────────────────────────────────────────────
+
+---Model-level facts. Streams the model briefly the first time; cached for the session.
+local function readModelInfo(model)
+    if INFO[model] then return INFO[model] end
+    local hash = joaat(model)
+    if not IsModelInCdimage(hash) or not IsModelAVehicle(hash) then
+        INFO[model] = { missing = true }
+        return INFO[model]
     end
-
-    -- Resolve the subject vehicle: the ox_target entity (on foot) or the one the
-    -- player is sitting in. Guard against 0 so submenus never run natives on a null
-    -- entity, and enforce EmergencyVehiclesOnly HERE so no entry path can skip it.
-    local vehicle = targetVehicle
-    if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
-        vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
+    local loaded = pcall(lib.requestModel, hash, 4000)
+    local min, max = GetModelDimensions(hash)
+    local info = {
+        speed = math.floor(GetVehicleModelMaxSpeed(hash) * 3.6 + 0.5),
+        accel = GetVehicleModelAcceleration(hash),
+        brake = GetVehicleModelMaxBraking(hash),
+        traction = GetVehicleModelMaxTraction(hash),
+        seats = GetVehicleModelNumberOfSeats(hash),
+        cls = CLASS_NAMES[GetVehicleClassFromName(hash)] or '-',
+        make = GetMakeNameFromVehicleModel(hash),
+        dims = { l = max.y - min.y, w = max.x - min.x, h = max.z - min.z },
+    }
+    if loaded then SetModelAsNoLongerNeeded(hash) end
+    INFO[model] = info
+    local row = BY_MODEL[model]
+    if row then
+        row.speed, row.seats = info.speed, info.seats
+        if info.cls ~= '-' then row.cls = info.cls end
     end
-    -- Re-opens (submenu Back buttons, post-repair returns) fire this event with
-    -- no argument. On foot that used to resolve to 0 and close the menu — fall
-    -- back to the vehicle this menu session is already about.
-    if vehicle == 0 and MenuVehicle ~= 0 and DoesEntityExist(MenuVehicle) then
-        vehicle = MenuVehicle
+    return info
+end
+
+---A live vehicle of this model: the one we sit in (ox_lib cache), else the last one we spawned.
+local function liveVehicle(model)
+    local hash = joaat(model)
+    local veh = cache.vehicle
+    if veh and veh ~= 0 and GetEntityModel(veh) == hash then return veh end
+    if not lastSpawned or lastSpawned.model ~= model then return nil end
+    if not NetworkDoesNetworkIdExist(lastSpawned.netId) then return nil end
+    local e = NetworkGetEntityFromNetworkId(lastSpawned.netId)
+    if e == 0 or not DoesEntityExist(e) then return nil end
+    return e
+end
+
+local function readHandling(model)
+    local veh = liveVehicle(model)
+    if not veh then return HANDLING[model] end
+    local rec = {}
+    for _, f in ipairs(HandlingFields.floats) do rec[f] = GetVehicleHandlingFloat(veh, 'CHandlingData', f) end
+    for _, f in ipairs(HandlingFields.ints) do rec[f] = GetVehicleHandlingInt(veh, 'CHandlingData', f) end
+    for _, f in ipairs(HandlingFields.vectors) do
+        local v = GetVehicleHandlingVector(veh, 'CHandlingData', f)
+        rec[f] = { x = v.x, y = v.y, z = v.z }
     end
-    if vehicle == 0 then
-        lib.notify({ title = 'Vehicle Modification',
-            description = 'Get in or stand beside the vehicle to modify it.',
-            type = 'error', duration = 5000 })
-        return
-    end
-    if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(vehicle) then
-        local adminBypass = IsAdminCached()
-        if not adminBypass then
-            lib.notify({ title = 'Vehicle Not Authorized',
-                description = 'Only emergency vehicles can be modified here',
-                type = 'error', duration = 5000 })
-            return
-        end
-    end
+    HANDLING[model] = rec
+    return rec
+end
 
-    MenuVehicle = vehicle
+local function cardInfo(model)
+    local row = BY_MODEL[model]
+    if not row then return nil end
+    local out = {}
+    for k, v in pairs(row) do out[k] = v end
+    for k, v in pairs(readModelInfo(model)) do out[k] = v end
+    out.handling = readHandling(model)
+    local veh = liveVehicle(model)
+    if veh then out.workshop = WorkshopClient.summary(veh) end
+    return out
+end
 
-    local vehicleTitle = "Vehicle Menu"
-    local vehicleInfo = nil
+-- ── rows ───────────────────────────────────────────────────────────────────────
 
-    if vehicle ~= 0 then
-        -- IMPORTANT: Must set mod kit before accessing vehicle mods
-        SetVehicleModKit(vehicle, 0)
-
-        local vehicleModel = GetEntityModel(vehicle)
-        local vehicleModelName = GetDisplayNameFromVehicleModel(vehicleModel)
-        local vehicleMake = GetMakeNameFromVehicleModel(vehicleModel)
-
-        vehicleTitle = vehicleModelName .. " Modifications"
-        vehicleInfo = {
-            {label = 'Make', value = (vehicleMake and vehicleMake ~= "") and vehicleMake or "Unknown"},
-            {label = 'Model', value = vehicleModelName},
-            {label = 'Class', value = GetVehicleClass(vehicle)}
+local function buildRows(data)
+    ALL, BY_MODEL, BY_HASH = {}, {}, {}
+    hashIndexed = false
+    local packs, classes, emergency, photos = data.packs or {}, data.classes or {}, data.emergency or {}, data.photos or {}
+    local registry = exports.qbx_core:GetVehiclesByName()
+    if type(registry) ~= 'table' then return end
+    for model, v in pairs(registry) do
+        local em = emergency[model]
+        local row = {
+            model = model, name = v.name or model, brand = v.brand or '', category = v.category or 'other',
+            type = v.type or '-', price = tonumber(v.price) or 0, pack = packs[model] or 'vanilla', cls = classes[model] or '-', make = '',
+            photo = photos[model],
         }
-    end
-    
-    local options = {}
-    
-    -- Only add options that are enabled in the config
-    if Config.EnabledModifications.Liveries then
-        table.insert(options, {
-            title = 'Liveries',
-            description = 'Select a vehicle livery.',
-            icon = 'brush',
-            onSelect = function()
-                OpenLiveryMenu()
-            end
-        })
-    end
-    
-    if Config.EnabledModifications.CustomLiveries then
-        table.insert(options, {
-            title = 'Custom Liveries',
-            description = 'Apply custom YFT liveries.',
-            icon = 'palette',
-            onSelect = function()
-                OpenCustomLiveriesMenu()
-            end
-        })
-    end
-    
-    if Config.EnabledModifications.Appearance then
-        table.insert(options, {
-            title = 'Vehicle Appearance',
-            description = 'Customize vehicle appearance.',
-            icon = 'spray-can',
-            onSelect = function()
-                OpenAppearanceMenu()
-            end
-        })
-    end
-    
-    if Config.EnabledModifications.Performance then
-        table.insert(options, {
-            title = 'Performance Mods',
-            description = 'Install performance upgrades.',
-            icon = 'gauge-high',
-            onSelect = function()
-                OpenPerformanceMenu()
-            end
-        })
-    end
-    
-    if Config.EnabledModifications.Extras then
-        table.insert(options, {
-            title = 'Extras',
-            description = 'Enable or disable vehicle extras.',
-            icon = 'toggle-on',
-            onSelect = function()
-                OpenExtrasMenu()
-            end
-        })
-    end
-    
-    if Config.EnabledModifications.Doors then
-        table.insert(options, {
-            title = 'Doors',
-            description = 'Open or close individual doors.',
-            icon = 'door-open',
-            onSelect = function()
-                OpenDoorsMenu()
-            end
-        })
-    end
-
-    -- Window controls (roll up/down) - always available for emergency vehicles
-    table.insert(options, {
-        title = 'Window Controls',
-        description = 'Roll windows up or down.',
-        icon = 'window-maximize',
-        onSelect = function()
-            OpenWindowControlsMenu()
+        if row.category == 'emergency' then
+            row.dept = em and em.dept or 'none'
+            row.kind = em and em.kind or 'Other'
         end
-    })
-
-    -- Seat controls (shuffle positions) - useful for passenger management
-    table.insert(options, {
-        title = 'Seat Controls',
-        description = 'Move between seats or eject passengers.',
-        icon = 'chair',
-        onSelect = function()
-            OpenSeatControlsMenu()
-        end
-    })
-
-    -- Field Repair option (v2.1.0+) - works anywhere with toolkit
-    if Config.FieldRepair and Config.FieldRepair.enabled then
-        table.insert(options, {
-            title = 'Field Repair',
-            description = 'Emergency roadside repair (requires toolkit)',
-            icon = 'toolbox',
-            onSelect = function()
-                RequestFieldRepair()
-            end
-        })
+        ALL[#ALL + 1] = row
+        BY_MODEL[model] = row
+        BY_HASH[joaat(model) % 0x100000000] = model
     end
+    hashIndexed = true
+end
 
-    -- Repair options honor the Config.EnabledModifications.Repair toggle
-    if Config.EnabledModifications.Repair then
-        table.insert(options, {
-            title = 'Emergency Repair',
-            description = 'Partial repair for disabled vehicles (slow movement only)',
-            icon = 'wrench',
-            onSelect = function()
-                EmergencyRepairVehicle()
-            end
-        })
+---The spawn code of a live vehicle's model, which is the key every model-keyed
+---table in this resource uses (client/workshop.lua modelOf, the emergency index,
+---custom liveries, presets, livery memory). Hashes are normalised to unsigned
+---32-bit because joaat and GetEntityModel disagree on sign above 2^31.
+---BY_HASH is filled by buildRows on the first panel open; before that (a livery
+---memory restore on vehicle entry) the registry is read once, here.
+---@param hash number|nil
+---@return string|nil spawnCode
+local function spawnCodeOf(hash)
+    if type(hash) ~= 'number' then return nil end
+    local key = hash % 0x100000000
+    local model = BY_HASH[key]
+    if model or hashIndexed then return model end
+    local registry = exports.qbx_core:GetVehiclesByName()
+    if type(registry) ~= 'table' then return nil end
+    for name in pairs(registry) do BY_HASH[joaat(name) % 0x100000000] = name end
+    hashIndexed = true
+    return BY_HASH[key]
+end
 
-        table.insert(options, {
-            title = 'Full Repair',
-            description = 'Complete vehicle repair and performance restoration',
-            icon = 'screwdriver-wrench',
-            onSelect = function()
-                FullRepairVehicle()
-            end
-        })
+-- ── open / close ───────────────────────────────────────────────────────────────
+
+local function closePanel()
+    if not isOpen then return end
+    isOpen = false
+    SetNuiFocus(false, false)
+    SendNUIMessage({ action = 'close' })
+    -- A stale ox_target vehicle must never outrank cache.vehicle on the next open.
+    WorkshopClient.clearVehicle()
+end
+
+local function openPanel(mode)
+    if isOpen then return end
+    startMode = mode or 'browse'
+    -- Static tables travel once per session; later opens only re-check access.
+    local ok, data = lib.callback.await('dps-fleet:server:open', false, serverData ~= nil)
+    if not ok then
+        notify('You do not have access to the fleet browser.', 'error')
+        return
     end
-
-    -- Preset System (v2.1.0+)
-    if Config.Presets and Config.Presets.enabled then
-        table.insert(options, {
-            title = 'Vehicle Presets',
-            description = 'Save and load vehicle configurations',
-            icon = 'bookmark',
-            onSelect = function()
-                OpenPresetMenu()
-            end
-        })
+    if data then serverData = data end
+    if not serverData then serverData = {} end
+    buildRows(serverData)
+    -- The sirens sheet keys tones on the vehicles.meta game name, not the spawn name.
+    WorkshopClient.setGames(serverData.games)
+    -- Trunk gear asks for the department map itself at start; this is its fallback
+    -- for a client that joined before the server had read data/emergency.json.
+    if GearClient and GearClient.setEmergency then GearClient.setEmergency(serverData.emergency) end
+    if #ALL == 0 then
+        notify('The vehicle registry is empty; nothing to show.', 'error')
+        return
     end
-
-    table.insert(options, {
-        title = 'Save Configuration',
-        description = 'Save current vehicle setup.',
-        icon = 'floppy-disk',
-        onSelect = function()
-            SaveVehicleConfig()
-        end
+    isOpen = true
+    SetNuiFocus(true, true)
+    SendNUIMessage({
+        action = 'open',
+        vehicles = ALL,
+        total = #ALL,
+        recent = loadList(KVP_RECENT),
+        favorites = favList(),
+        deptNames = Groups.DEPT_NAME,
+        deptCodes = Groups.DEPT_CODE,
+        categoryLabels = Groups.CATEGORY_LABEL,
+        mode = startMode,
     })
+end
 
-    table.insert(options, {
-        title = 'Close Menu',
-        description = 'Exit the vehicle modification menu',
-        icon = 'xmark',
-        onSelect = function()
-            lib.hideContext()
-        end
-    })
+-- client/target.lua (Task 8) opens the panel straight to the workshop from
+-- ox_target; openPanel/closePanel are local to this file, so this is the export.
+FleetPanel = FleetPanel or {}
+FleetPanel.open = openPanel
+FleetPanel.close = closePanel
+-- client/workshop.lua and client/target.lua key their tables on the spawn code.
+FleetPanel.spawnCodeOf = spawnCodeOf
 
-    lib.registerContext({
-        id = 'VehicleModMenu',
-        title = vehicleTitle,
-        metadata = vehicleInfo,
-        options = options
-    })
-    lib.showContext('VehicleModMenu')
+local function toggle(mode)
+    if isOpen then closePanel() else openPanel(mode) end
+end
+RegisterCommand('fleet', function() toggle('browse') end, false)
+RegisterCommand('carmenu', function() toggle('browse') end, false)   -- alias kept for muscle memory
+RegisterCommand('evm', function() toggle('workshop') end, false)     -- alias: opens the workshop side
+RegisterKeyMapping('fleet', 'DPS Fleet: open the vehicle browser', 'keyboard', 'F7')
+TriggerEvent('chat:addSuggestion', '/fleet', 'Open the DPS fleet panel (browse and workshop)')
+
+-- ── NUI callbacks ──────────────────────────────────────────────────────────────
+
+RegisterNUICallback('close', function(_, cb)
+    closePanel()
+    cb({ ok = true })
 end)
 
--- Livery Menu
--- Pagination settings for large livery lists
-local LIVERIES_PER_PAGE = 20  -- Prevents frame drops with 50+ liveries
-
-function OpenLiveryMenu(page)
-    page = page or 1
-    local vehicle = GetMenuVehicle()
-
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Error',
-            description = 'Get in or stand beside the vehicle to change liveries',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-
-    -- IMPORTANT: Must set mod kit before accessing vehicle mods
-    SetVehicleModKit(vehicle, 0)
-
-    local options = {}
-    local numLiveries = GetVehicleLiveryCount(vehicle)
-    local currentLivery = GetVehicleLivery(vehicle)
-    local numMods = GetNumVehicleMods(vehicle, 48)
-
-    -- Determine total liveries (standard or mod-based)
-    local totalLiveries = numLiveries > 0 and numLiveries or (numMods > 0 and numMods + 1 or 0)
-    local totalPages = math.ceil(totalLiveries / LIVERIES_PER_PAGE)
-    local startIndex = (page - 1) * LIVERIES_PER_PAGE
-    local endIndex = math.min(startIndex + LIVERIES_PER_PAGE - 1, totalLiveries - 1)
-
-    -- Add custom liveries option if available (always at top)
-    local vehicleModel = GetEntityModel(vehicle)
-    local vehicleModelName = GetDisplayNameFromVehicleModel(vehicleModel):lower()
-
-    if Config.CustomLiveries and Config.CustomLiveries[vehicleModelName] then
-        table.insert(options, {
-            title = 'Custom Liveries (YFT)',
-            description = 'Browse custom YFT liveries for this vehicle',
-            icon = 'palette',
-            onSelect = function()
-                OpenCustomLiveriesMenu()
-            end
-        })
-    end
-
-    -- Search option for large livery lists
-    if totalLiveries > 10 then
-        table.insert(options, {
-            title = 'Search Liveries',
-            description = 'Find specific liveries by name or number',
-            icon = 'magnifying-glass',
-            onSelect = function()
-                OpenLiverySearchMenu()
-            end
-        })
-    end
-
-    -- Pagination header for large lists
-    if totalPages > 1 then
-        table.insert(options, {
-            title = ('Page %d of %d (%d liveries)'):format(page, totalPages, totalLiveries),
-            description = 'Use Previous/Next to navigate pages',
-            icon = 'list-ol',
-            disabled = true
-        })
-    end
-
-    -- Build livery options for current page only (prevents frame drops)
-    if numLiveries > 0 then
-        -- Standard liveries
-        for i = startIndex, endIndex do
-            if i < numLiveries then
-                local isActive = (currentLivery == i)
-                local liveryIndex = i
-                -- Use enhanced livery name with label lookup (v2.1.1+)
-                local liveryName = GetEnhancedLiveryName and GetEnhancedLiveryName(vehicle, i) or ('Livery %d'):format(i)
-                table.insert(options, {
-                    title = liveryName,
-                    description = isActive and 'Currently Active' or 'Click to apply',
-                    icon = isActive and 'check-circle' or 'circle',
-                    metadata = {
-                        {label = 'ID', value = tostring(i)}
-                    },
-                    onSelect = function()
-                        SetVehicleLivery(vehicle, liveryIndex)
-                        SaveLiveryToMemory(vehicle) -- v2.1.0+ livery memory
-                        lib.notify({
-                            title = 'Livery Applied',
-                            description = 'Applied ' .. liveryName,
-                            type = 'success',
-                            duration = 3000
-                        })
-                        OpenLiveryMenu(page)
-                    end
-                })
-            end
-        end
-    elseif numMods > 0 then
-        -- Mod-based liveries (index 48)
-        local currentMod = GetVehicleMod(vehicle, 48)
-        for i = startIndex, endIndex do
-            local modIndex = i - 1  -- -1 is default, 0+ are mods
-            if modIndex < numMods then
-                local modName = modIndex == -1 and "Default" or ("Style %d"):format(modIndex + 1)
-                local isActive = (currentMod == modIndex)
-
-                table.insert(options, {
-                    title = modName,
-                    description = isActive and 'Currently Active' or 'Click to apply',
-                    icon = isActive and 'check-circle' or 'circle',
-                    onSelect = function()
-                        SetVehicleMod(vehicle, 48, modIndex, false)
-                        SaveLiveryToMemory(vehicle) -- v2.1.0+ livery memory
-                        lib.notify({
-                            title = 'Livery Applied',
-                            description = 'Applied ' .. modName,
-                            type = 'success',
-                            duration = 3000
-                        })
-                        OpenLiveryMenu(page)
-                    end
-                })
-            end
-        end
-    else
-        table.insert(options, {
-            title = 'No Liveries Available',
-            description = 'This vehicle has no standard liveries',
-            icon = 'circle-info',
-            disabled = true
-        })
-    end
-
-    -- Pagination controls
-    if totalPages > 1 then
-        if page > 1 then
-            table.insert(options, {
-                title = '← Previous Page',
-                description = ('Go to page %d'):format(page - 1),
-                icon = 'arrow-left',
-                onSelect = function()
-                    OpenLiveryMenu(page - 1)
-                end
-            })
-        end
-
-        if page < totalPages then
-            table.insert(options, {
-                title = 'Next Page →',
-                description = ('Go to page %d'):format(page + 1),
-                icon = 'arrow-right',
-                onSelect = function()
-                    OpenLiveryMenu(page + 1)
-                end
-            })
-        end
-    end
-
-    lib.registerContext({
-        id = 'LiveryMenu',
-        title = totalPages > 1 and ('Liveries (Page %d/%d)'):format(page, totalPages) or 'Select Livery',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('LiveryMenu')
-end
-
--- Custom Liveries Menu
-function OpenCustomLiveriesMenu()
-    local vehicle = GetMenuVehicle()
-    
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Error',
-            description = 'Get in or stand beside the vehicle to change liveries',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    local vehicleModel = GetEntityModel(vehicle)
-    local vehicleModelName = GetDisplayNameFromVehicleModel(vehicleModel):lower()
-    
-    local availableLiveries = {}
-    
-    if Config.CustomLiveries then
-        availableLiveries = Config.CustomLiveries[vehicleModelName] or {}
-    else
-        Config.CustomLiveries = {}
-    end
-    
-    local options = {}
-    
-    table.insert(options, {
-        title = 'Stock (No Livery)',
-        description = 'Remove custom livery',
-        onSelect = function()
-            SetVehicleLivery(vehicle, 0)
-            SetVehicleMod(vehicle, 48, -1, false)
-            
-            TriggerServerEvent('vehiclemods:server:clearCustomLivery', NetworkGetNetworkIdFromEntity(vehicle))
-            
-            lib.notify({
-                title = 'Livery Removed',
-                description = 'Custom livery removed',
-                type = 'success',
-                duration = 5000
-            })
-            OpenCustomLiveriesMenu()
-        end
-    })
-    
-    if availableLiveries and #availableLiveries > 0 then
-        for i, livery in ipairs(availableLiveries) do
-            table.insert(options, {
-                title = livery.name,
-                description = 'Apply ' .. livery.name .. ' livery',
-                onSelect = function()
-                    TriggerServerEvent('vehiclemods:server:applyCustomLivery', 
-                        NetworkGetNetworkIdFromEntity(vehicle), 
-                        vehicleModelName, 
-                        livery.file
-                    )
-                    lib.notify({
-                        title = 'Livery Applied',
-                        description = 'Applied ' .. livery.name .. ' livery',
-                        type = 'success',
-                        duration = 5000
-                    })
-                    OpenCustomLiveriesMenu()
-                end
-            })
-        end
-    else
-        table.insert(options, {
-            title = 'No Custom Liveries',
-            description = 'This vehicle has no custom YFT liveries configured',
-            icon = 'circle-info',
-            disabled = true
-        })
-    end
-    
-    -- Option to add new livery
-    table.insert(options, {
-        title = 'Add New Livery',
-        description = 'Add a new custom livery for this vehicle',
-        onSelect = function()
-            OpenAddCustomLiveryMenu(vehicleModelName)
-        end
-    })
-
-    lib.registerContext({
-        id = 'CustomLiveriesMenu',
-        title = 'Custom Liveries',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('CustomLiveriesMenu')
-end
-
--- Enhanced custom livery event handler with proper timeout and cleanup
-RegisterNetEvent('vehiclemods:client:setCustomLivery')
-AddEventHandler('vehiclemods:client:setCustomLivery', function(netId, vehicleModelName, liveryFile)
-    local vehicle = NetworkGetEntityFromNetworkId(netId)
-    
-    if not vehicle or not DoesEntityExist(vehicle) then
-        if Config.Debug then
-            print("^1ERROR:^0 Vehicle not found for custom livery application")
-        end
-        return
-    end
-    
-    -- Validate inputs
-    if not vehicleModelName or not liveryFile then
-        print("^1ERROR:^0 Invalid parameters for custom livery")
-        return
-    end
-    
-    -- Extract base name without "liveries/" prefix
-    local baseName = string.match(liveryFile, "([^/]+)%.yft$")
-    if not baseName then
-        baseName = liveryFile:gsub(".yft", "")
-    end
-    
-    local textureDict = vehicleModelName .. "_" .. baseName
-    
-    -- Check if already loaded
-    if not HasStreamedTextureDictLoaded(textureDict) then
-        RequestStreamedTextureDict(textureDict)
-        local timeout = 0
-        while not HasStreamedTextureDictLoaded(textureDict) and timeout < TEXTURE_LOAD_TIMEOUT do
-            Wait(10)
-            timeout = timeout + 1
-        end
-        
-        if not HasStreamedTextureDictLoaded(textureDict) then
-            print("^1ERROR:^0 Failed to load texture dictionary: " .. textureDict .. " (timeout)")
-            return
-        end
-    end
-    
-    if HasStreamedTextureDictLoaded(textureDict) then
-        local vehicleEntityId = VehToNet(vehicle)
-        if not ActiveCustomLiveries then ActiveCustomLiveries = {} end
-        
-        -- Clean up old texture if exists
-        if ActiveCustomLiveries[vehicleEntityId] and ActiveCustomLiveries[vehicleEntityId].dict then
-            local oldDict = ActiveCustomLiveries[vehicleEntityId].dict
-            if oldDict ~= textureDict and HasStreamedTextureDictLoaded(oldDict) then
-                SetStreamedTextureDictAsNoLongerNeeded(oldDict)
-                if loadedTextures then
-                    loadedTextures[oldDict] = nil
-                end
-            end
-        end
-        
-        ActiveCustomLiveries[vehicleEntityId] = {
-            file = liveryFile,
-            dict = textureDict,
-            model = vehicleModelName
-        }
-        
-        -- Track loaded texture
-        if not loadedTextures then loadedTextures = {} end
-        loadedTextures[textureDict] = GetGameTimer()
-        
-        -- Apply livery
-        local liveryModCount = GetNumVehicleMods(vehicle, 48)
-        if liveryModCount > 0 then
-            SetVehicleMod(vehicle, 48, 0, false)
-        else
-            local liveryCount = GetVehicleLiveryCount(vehicle)
-            if liveryCount > 0 then
-                SetVehicleLivery(vehicle, 1) -- Use first livery as base
-            end
-        end
-        
-        -- NOTE: GetEntityRoutingBucket/SetEntityRoutingBucket are SERVER-only
-        -- natives. Calling them here threw "attempt to call a nil value" on every
-        -- client each time any player applied a custom livery, aborting this
-        -- handler part-way through. The texture swap below is what actually
-        -- refreshes the appearance, so the bucket bounce is simply removed.
-        
-        print("^2INFO:^0 Applied custom livery " .. liveryFile .. " to vehicle")
-    else
-        print("^1ERROR:^0 Failed to load texture dictionary for livery: " .. textureDict)
-    end
+RegisterNUICallback('sections', function(req, cb)
+    if type(req) ~= 'table' then cb({ sections = {} }) return end
+    local sections = Search.sections(ALL, req.q, { chip = req.chip or 'all', recent = loadList(KVP_RECENT), favorites = favList() })
+    cb({ sections = sections })
 end)
 
--- Removing custom liveries
-RegisterNetEvent('vehiclemods:client:clearCustomLivery')
-AddEventHandler('vehiclemods:client:clearCustomLivery', function(netId)
-    local vehicle = NetworkGetEntityFromNetworkId(netId)
-    
-    if not vehicle or not DoesEntityExist(vehicle) then
-        return
-    end
-    
-    local vehicleEntityId = VehToNet(vehicle)
-    if ActiveCustomLiveries and ActiveCustomLiveries[vehicleEntityId] then
-        local liveryInfo = ActiveCustomLiveries[vehicleEntityId]
-        
-        SetVehicleLivery(vehicle, 0) -- Reset to default livery
-        SetVehicleMod(vehicle, 48, -1, false) -- Remove livery mod
-        
-        if HasStreamedTextureDictLoaded(liveryInfo.dict) then
-            SetStreamedTextureDictAsNoLongerNeeded(liveryInfo.dict)
-        end
-        
-        ActiveCustomLiveries[vehicleEntityId] = nil
-        
-        print("^2INFO:^0 Cleared custom livery from vehicle")
-    end
+RegisterNUICallback('info', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model or not BY_MODEL[model] then cb({ ok = false }) return end
+    cb({ ok = true, info = readModelInfo(model), handling = readHandling(model), row = BY_MODEL[model], favorite = isFav(model) })
 end)
 
--- Add custom livery menu
-function OpenAddCustomLiveryMenu(vehicleModelName)
-    -- lib.showTextInput is not an ox_lib API; this threw immediately and made
-    -- the whole add-custom-livery path (and its server handler) unreachable.
-    local input = lib.inputDialog('Add Custom Livery', {
-        { type = 'input', label = 'Livery Name', required = true, placeholder = 'e.g. Police Livery 1' },
-        { type = 'input', label = 'YFT File Path', required = true, placeholder = vehicleModelName .. '_livery1.yft' },
-    })
-
-    if input and input[1] and input[2] then
-        TriggerServerEvent('vehiclemods:server:addCustomLivery', vehicleModelName, input[1], input[2])
-
-        Citizen.SetTimeout(500, function()
-            OpenCustomLiveriesMenu()
-        end)
+RegisterNUICallback('spawn', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model or not BY_MODEL[model] then cb({ ok = false, reason = 'Unknown vehicle.' }) return end
+    local mode = req.mode == 'beside' and 'beside' or 'replace'
+    local beside
+    if mode == 'beside' then
+        local base = cache.vehicle or cache.ped
+        local len = 5.0
+        if cache.vehicle then
+            local min, max = GetModelDimensions(GetEntityModel(cache.vehicle))
+            len = (max.x - min.x) + 3.0
+        end
+        local p = GetOffsetFromEntityInWorldCoords(base, len, 0.0, 0.0)
+        beside = { x = p.x, y = p.y, z = p.z, w = GetEntityHeading(base) }
     end
-end
-
--- Function to search for liveries
-function OpenLiverySearchMenu()
-    local vehicle = GetMenuVehicle()
-    
-    if vehicle == 0 then
+    local ok, plate, netId = lib.callback.await('dps-fleet:server:spawn', false, model, mode, beside)
+    if not ok then
+        cb({ ok = false, reason = plate or 'Spawn failed.' })
         return
     end
-    
-    -- same fix as above: lib.showTextInput does not exist in ox_lib
-    local input = lib.inputDialog('Search Liveries', {
-        { type = 'input', label = 'Search term', placeholder = 'e.g. LSPD or Sheriff' },
-    })
-
-    local term = input and input[1]
-    if term and term ~= '' then
-        FilteredLiveryMenu(term:lower())
-    else
-        OpenLiveryMenu()
+    lastSpawned = { netId = netId, model = model }
+    if plate and GetResourceState('wasabi_carlock') == 'started' then
+        pcall(function() exports.wasabi_carlock:GiveKey(plate) end)
     end
+    local recent = pushRecent(model)
+    -- the vehicle exists now: read its handling once it has settled
+    SetTimeout(250, function() readHandling(model) end)
+    cb({ ok = true, plate = plate, recent = recent })
+end)
+
+RegisterNUICallback('favorite', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model or not BY_MODEL[model] then cb({ ok = false }) return end
+    local list = favList()
+    local found
+    for i, m in ipairs(list) do if m == model then found = i end end
+    if found then table.remove(list, found) else table.insert(list, 1, model) end
+    saveList(KVP_FAV, list)
+    cb({ ok = true, favorites = list, on = found == nil })
+end)
+
+RegisterNUICallback('card', function(req, cb)
+    local info = cardInfo(type(req) == 'table' and req.model or nil)
+    if not info then cb({ ok = false, reason = 'Unknown vehicle.' }) return end
+    cb({ ok = true, text = Card.format(info) })
+end)
+
+RegisterNUICallback('handlingText', function(req, cb)
+    local model = type(req) == 'table' and req.model or nil
+    if not model then cb({ ok = false, reason = 'Unknown vehicle.' }) return end
+    local rec = readHandling(model)
+    if not rec then cb({ ok = false, reason = 'Spawn it or sit in it first.' }) return end
+    cb({ ok = true, text = Card.handling(rec, HandlingFields, model) })
+end)
+
+RegisterNUICallback('delete', function(_, cb)
+    local veh = cache.vehicle
+    if (not veh or veh == 0) and lastSpawned and NetworkDoesNetworkIdExist(lastSpawned.netId) then
+        veh = NetworkGetEntityFromNetworkId(lastSpawned.netId)
+    end
+    if not veh or veh == 0 or not DoesEntityExist(veh) then cb({ ok = false, reason = 'Nothing to remove.' }) return end
+    local ok = lib.callback.await('dps-fleet:server:delete', false, NetworkGetNetworkIdFromEntity(veh))
+    cb({ ok = ok == true, reason = ok and nil or 'Could not remove it.' })
+end)
+
+-- ── workshop mode ──────────────────────────────────────────────────────────────
+-- The panel renders the sheets client/workshop.lua builds; this part only resolves
+-- the vehicle, checks access once on open, and hands sheets back.
+
+---Undercover for the neon rule means "listed in Config.UndercoverNeon", the only
+---definition this resource has.
+local function isUndercoverModel(model)
+    local uc = Config.UndercoverNeon
+    if not uc or not uc.enabled or type(model) ~= 'string' then return false end
+    for _, allowed in ipairs(uc.allowedVehicles or {}) do
+        if allowed == model then return true end
+    end
+    return false
 end
 
--- Function to filter liveries by search term
-function FilteredLiveryMenu(searchTerm)
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    local options = {}
-    local numLiveries = GetVehicleLiveryCount(vehicle)
-    local currentLivery = GetVehicleLivery(vehicle)
-    local filteredResults = 0
-    
-    -- For standard liveries
-    if numLiveries > 0 then
-        for i = 0, numLiveries - 1 do
-            local liveryName = 'Livery ' .. i
-            
-            if string.find(liveryName:lower(), searchTerm) then
-                local isActive = (currentLivery == i)
-                table.insert(options, {
-                    title = liveryName,
-                    description = 'Apply ' .. liveryName,
-                    metadata = {
-                        {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-                    },
-                    onSelect = function()
-                        SetVehicleLivery(vehicle, i)
-                        SaveLiveryToMemory(vehicle) -- v2.1.0+ livery memory
-                        lib.notify({
-                            title = 'Livery Applied',
-                            description = 'Applied ' .. liveryName .. '.',
-                            type = 'success',
-                            duration = 5000
-                        })
-                        FilteredLiveryMenu(searchTerm)
-                    end
-                })
-                filteredResults = filteredResults + 1
-            end
-        end
-    end
-    
-    -- For mod slot 48 liveries
-    local numMods = GetNumVehicleMods(vehicle, 48)
-    local currentMod = GetVehicleMod(vehicle, 48)
-    
-    if numMods > 0 then
-        for i = -1, numMods - 1 do
-            local modName = i == -1 and "Default" or "Style " .. (i + 1)
+---Explicit entity (ox_target, Task 8) > the vehicle we sit in > the last one we
+---spawned of this model. Re-run before every workshop call so a deleted vehicle
+---is caught instead of handed to a native.
+local function resolveWorkshopVehicle(model)
+    local explicit = WorkshopClient and WorkshopClient.vehicle and WorkshopClient.vehicle() or nil
+    if explicit then return explicit end
+    local veh = cache.vehicle
+    if veh and veh ~= 0 and DoesEntityExist(veh) then return veh end
+    if type(model) == 'string' then return liveVehicle(model) end
+    return nil
+end
 
-            if string.find(modName:lower(), searchTerm) then
-                local isActive = (currentMod == i)
+local function wsResolve(model)
+    wsVehicle = resolveWorkshopVehicle(model)
+    return wsVehicle
+end
 
-                table.insert(options, {
-                    title = modName,
-                    description = 'Apply ' .. modName,
-                    metadata = {
-                        {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-                    },
-                    onSelect = function()
-                        SetVehicleMod(vehicle, 48, i, false)
-                        SaveLiveryToMemory(vehicle) -- v2.1.0+ livery memory
-                        lib.notify({
-                            title = 'Livery Applied',
-                            description = 'Applied ' .. modName .. '.',
-                            type = 'success',
-                            duration = 5000
-                        })
-                        FilteredLiveryMenu(searchTerm)
-                    end
-                })
-                filteredResults = filteredResults + 1
-            end
-        end
-    end
-    
-    -- Custom YFT liveries search
-    local vehicleModel = GetEntityModel(vehicle)
-    local vehicleModelName = GetDisplayNameFromVehicleModel(vehicleModel):lower()
-    
-    if Config.CustomLiveries and Config.CustomLiveries[vehicleModelName] then
-        for _, livery in ipairs(Config.CustomLiveries[vehicleModelName]) do
-            if string.find(livery.name:lower(), searchTerm) then
-                table.insert(options, {
-                    title = livery.name,
-                    description = 'Apply ' .. livery.name .. ' custom livery',
-                    onSelect = function()
-                        TriggerServerEvent('vehiclemods:server:applyCustomLivery', 
-                            NetworkGetNetworkIdFromEntity(vehicle), 
-                            vehicleModelName, 
-                            livery.file
-                        )
-                        lib.notify({
-                            title = 'Livery Applied',
-                            description = 'Applied ' .. livery.name .. ' livery',
-                            type = 'success',
-                            duration = 5000
-                        })
-                        FilteredLiveryMenu(searchTerm)
-                    end
-                })
-                filteredResults = filteredResults + 1
-            end
-        end
-    end
-    
-    if filteredResults == 0 then
-        table.insert(options, {
-            title = 'No Results Found',
-            description = 'No liveries match your search term: ' .. searchTerm,
-            onSelect = function()
-                OpenLiverySearchMenu()
-            end
-        })
-    end
-    
-    table.insert(options, 1, {
-        title = 'New Search',
-        description = 'Search for a different livery',
-        onSelect = function()
-            OpenLiverySearchMenu()
-        end
-    })
-    
-    table.insert(options, 2, {
-        title = 'Show All Liveries',
-        description = 'Display all available liveries',
-        onSelect = function()
-            OpenLiveryMenu()
-        end
-    })
+local function wsSections()
+    return Workshop.enabledSections(Config, wsModel, isUndercoverModel(wsModel))
+end
 
-    lib.registerContext({
-        id = 'FilteredLiveryMenu',
-        title = 'Search Results: ' .. searchTerm,
-        metadata = {
-            {label = 'Results', value = filteredResults}
+local function sectionAllowed(id)
+    for _, section in ipairs(wsSections()) do
+        if section.id == id then return true end
+    end
+    return false
+end
+
+-- Every section has a sheet now; this stays for the next one that lands ahead of its sheet.
+local NOT_WIRED = {}
+
+---The colour swatches, keyed by string so the index-0 entry survives the trip to
+---the NUI (a 0-based Lua table is not an array and must not become one).
+local COLOUR_HEX_NUI
+local function colourHexMap()
+    if COLOUR_HEX_NUI then return COLOUR_HEX_NUI end
+    COLOUR_HEX_NUI = {}
+    for index, hex in pairs(Workshop.COLOUR_HEX or {}) do COLOUR_HEX_NUI[tostring(index)] = hex end
+    return COLOUR_HEX_NUI
+end
+
+RegisterNUICallback('ws:open', function(req, cb)
+    local model = nil
+    if type(req) == 'table' and type(req.model) == 'string' and #req.model <= 40 then model = req.model end
+    local veh = wsResolve(model)
+    if not veh then cb({ ok = false, reason = 'Sit in a vehicle or target one.' }) return end
+    wsModel = spawnCodeOf(GetEntityModel(veh))
+
+    local ok, why = lib.callback.await('dps-fleet:server:workshopAccess', false)
+    if not ok then
+        local reason = type(why) == 'string' and why or 'You cannot use the workshop.'
+        notify(reason, 'error')
+        cb({ ok = false, reason = reason })
+        return
+    end
+
+    local row = wsModel and BY_MODEL[wsModel] or nil
+    local plate = GetVehicleNumberPlateText(veh)
+    cb({
+        ok = true,
+        vehicle = {
+            model = wsModel or '-',
+            name = row and ((row.brand ~= '' and row.brand .. ' ' or '') .. row.name) or 'This vehicle',
+            plate = type(plate) == 'string' and plate:gsub('%s+$', '') or nil,
         },
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('FilteredLiveryMenu')
-end
-
--- Performance Menu
-function OpenPerformanceMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-
-    -- IMPORTANT: Must set mod kit before accessing vehicle mods
-    SetVehicleModKit(vehicle, 0)
-
-    local modTypes = {
-        { name = "Engine", id = 11 },
-        { name = "Brakes", id = 12 },
-        { name = "Transmission", id = 13 },
-        { name = "Suspension", id = 15 },
-        { name = "Armor", id = 16 },
-        { name = "Turbo", id = 18 }
-    }
-    
-    local options = {}
-    
-    for _, modType in pairs(modTypes) do
-        local numMods = GetNumVehicleMods(vehicle, modType.id)
-        local specialCase = false
-        
-        -- Special case for Turbo which is a toggle
-        if modType.id == 18 then
-            numMods = 1
-            specialCase = true
-        end
-        
-        if numMods > 0 then
-            local status = ""
-            if specialCase then
-                status = IsToggleModOn(vehicle, modType.id) and "Enabled" or "Disabled"
-            else
-                local currentLevel = GetVehicleMod(vehicle, modType.id)
-                if currentLevel == -1 then
-                    status = "Stock"
-                else
-                    status = "Level " .. (currentLevel + 1)
-                end
-            end
-            
-            table.insert(options, {
-                title = modType.name,
-                description = specialCase and 'Toggle turbo on/off' or 'Available upgrades: ' .. numMods,
-                metadata = {
-                    {label = 'Current', value = status}
-                },
-                onSelect = function()
-                    if specialCase then
-                        ToggleTurbo(vehicle)
-                    else
-                        OpenPerformanceModMenu(modType.id, modType.name)
-                    end
-                end
-            })
-        end
-    end
-
-    lib.registerContext({
-        id = 'PerformanceMenu',
-        title = 'Performance Upgrades',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('PerformanceMenu')
-end
-
--- Toggle turbo function
-function ToggleTurbo(vehicle)
-    local hasTurbo = IsToggleModOn(vehicle, 18)
-    
-    ToggleVehicleMod(vehicle, 18, not hasTurbo)
-    
-    lib.notify({
-        title = 'Turbo',
-        description = hasTurbo and 'Turbo disabled' or 'Turbo enabled',
-        type = 'success',
-        duration = 5000
-    })
-    
-    OpenPerformanceMenu()
-end
-
--- Performance mod selection menu
-function OpenPerformanceModMenu(modType, modTypeName)
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-
-    -- IMPORTANT: Must set mod kit before accessing vehicle mods
-    SetVehicleModKit(vehicle, 0)
-
-    local options = {}
-    local numMods = GetNumVehicleMods(vehicle, modType)
-    local currentMod = GetVehicleMod(vehicle, modType)
-    
-    table.insert(options, {
-        title = 'Stock ' .. modTypeName,
-        description = 'Remove ' .. modTypeName .. ' upgrades',
-        metadata = {
-            {label = 'Status', value = (currentMod == -1) and 'Active' or 'Inactive'}
-        },
-        onSelect = function()
-            SetVehicleMod(vehicle, modType, -1, false)
-            lib.notify({
-                title = 'Upgrade Removed',
-                description = modTypeName .. ' set to stock',
-                type = 'success',
-                duration = 5000
-            })
-            OpenPerformanceModMenu(modType, modTypeName)
-        end
-    })
-    
-    local modNames = {}
-    if modType == 11 then  -- Engine
-        modNames = {"EMS Upgrade, Level 1", "EMS Upgrade, Level 2", "EMS Upgrade, Level 3", "EMS Upgrade, Level 4"}
-    elseif modType == 12 then  -- Brakes
-        modNames = {"Street Brakes", "Sport Brakes", "Race Brakes", "Racing Brakes"}
-    elseif modType == 13 then  -- Transmission
-        modNames = {"Street Transmission", "Sports Transmission", "Race Transmission", "Super Transmission"}
-    elseif modType == 15 then  -- Suspension
-        modNames = {"Lowered Suspension", "Street Suspension", "Sport Suspension", "Competition Suspension"}
-    elseif modType == 16 then  -- Armor
-        modNames = {"Armor Upgrade 20%", "Armor Upgrade 40%", "Armor Upgrade 60%", "Armor Upgrade 80%", "Armor Upgrade 100%"}
-    end
-    
-    for i = 0, numMods - 1 do
-        local modName = (modNames[i+1] ~= nil) and modNames[i+1] or (modTypeName .. " Level " .. (i + 1))
-        local isActive = (currentMod == i)
-        
-        table.insert(options, {
-            title = modName,
-            description = 'Apply ' .. modName,
-            metadata = {
-                {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleMod(vehicle, modType, i, false)
-                lib.notify({
-                    title = 'Upgrade Applied',
-                    description = 'Applied ' .. modName,
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenPerformanceModMenu(modType, modTypeName)
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'PerformanceModMenu',
-        title = modTypeName .. ' Upgrades',
-        options = options,
-        menu = 'PerformanceMenu',
-        onBack = function()
-            OpenPerformanceMenu()
-        end
-    })
-    lib.showContext('PerformanceModMenu')
-end
-
--- Extras Menu
-function OpenExtrasMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    local options = {}
-    
-    for i = 1, 20 do
-        if DoesExtraExist(vehicle, i) then
-            local isEnabled = IsVehicleExtraTurnedOn(vehicle, i)
-            
-            table.insert(options, {
-                title = 'Extra ' .. i,
-                description = isEnabled and 'Disable Extra ' .. i or 'Enable Extra ' .. i,
-                icon = isEnabled and 'toggle-on' or 'toggle-off',
-                metadata = {
-                    {label = 'Status', value = isEnabled and 'Enabled' or 'Disabled'}
-                },
-                onSelect = function()
-                    SetVehicleExtra(vehicle, i, isEnabled and 1 or 0)
-                    lib.notify({
-                        title = 'Success',
-                        description = (isEnabled and 'Disabled' or 'Enabled') .. ' Extra ' .. i .. '.',
-                        type = 'success',
-                        duration = 5000
-                    })
-                    OpenExtrasMenu()
-                end
-            })
-        end
-    end
-
-    if #options == 0 then
-        table.insert(options, {
-            title = 'No Extras Available',
-            description = 'This vehicle has no extras to toggle',
-            icon = 'circle-info',
-            disabled = true
-        })
-    end
-    
-    lib.registerContext({
-        id = 'ExtrasMenu',
-        title = 'Toggle Extras',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('ExtrasMenu')
-end
-
--- Door Control Menu
-function OpenDoorsMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    local doors = {
-        { title = 'Driver Door', index = 0 },
-        { title = 'Passenger Door', index = 1 },
-        { title = 'Rear Driver Door', index = 2 },
-        { title = 'Rear Passenger Door', index = 3 },
-        { title = 'Hood', index = 4 },
-        { title = 'Trunk', index = 5 }
-    }
-
-    local options = {}
-    for _, door in pairs(doors) do
-        local isDoorOpen = GetVehicleDoorAngleRatio(vehicle, door.index) > 0
-        
-        table.insert(options, {
-            title = door.title,
-            description = isDoorOpen and 'Close ' .. door.title or 'Open ' .. door.title,
-            icon = isDoorOpen and 'door-open' or 'door-closed',
-            metadata = {
-                {label = 'Status', value = isDoorOpen and 'Open' or 'Closed'}
-            },
-            onSelect = function()
-                if isDoorOpen then
-                    SetVehicleDoorShut(vehicle, door.index, false)
-                else
-                    SetVehicleDoorOpen(vehicle, door.index, false, false)
-                end
-                OpenDoorsMenu()
-            end
-        })
-    end
-
-    -- Add all doors options
-    table.insert(options, {
-        title = 'All Doors',
-        description = 'Open or close all doors at once',
-        onSelect = function()
-            -- Check if any door is open
-            local anyDoorOpen = false
-            for _, door in pairs(doors) do
-                if GetVehicleDoorAngleRatio(vehicle, door.index) > 0 then
-                    anyDoorOpen = true
-                    break
-                end
-            end
-            
-            for _, door in pairs(doors) do
-                if anyDoorOpen then
-                    SetVehicleDoorShut(vehicle, door.index, false)
-                else
-                    SetVehicleDoorOpen(vehicle, door.index, false, false)
-                end
-            end
-            
-            lib.notify({
-                title = 'All Doors',
-                description = anyDoorOpen and 'All doors closed' or 'All doors opened',
-                type = 'success',
-                duration = 5000
-            })
-            
-            OpenDoorsMenu()
-        end
-    })
-
-    lib.registerContext({
-        id = 'DoorsMenu',
-        title = 'Doors Control',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('DoorsMenu')
-end
-
------------------------------------------------------------
--- WINDOW CONTROLS MENU
--- Roll windows up/down for emergency vehicle operations
------------------------------------------------------------
-function OpenWindowControlsMenu()
-    local vehicle = GetMenuVehicle()
-
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Error',
-            description = 'You must be in a vehicle',
-            type = 'error',
-            duration = 3000
-        })
-        return
-    end
-
-    local windows = {
-        { title = 'Driver Window', index = 0 },
-        { title = 'Passenger Window', index = 1 },
-        { title = 'Rear Driver Window', index = 2 },
-        { title = 'Rear Passenger Window', index = 3 }
-    }
-
-    local options = {}
-
-    -- Individual window controls
-    for _, window in ipairs(windows) do
-        local windowIndex = window.index
-        table.insert(options, {
-            title = window.title,
-            description = 'Roll down this window',
-            icon = 'window-maximize',
-            onSelect = function()
-                RollDownWindow(vehicle, windowIndex)
-                lib.notify({
-                    title = 'Window Rolled Down',
-                    description = window.title .. ' rolled down',
-                    type = 'success',
-                    duration = 2000
-                })
-            end
-        })
-    end
-
-    -- All windows controls
-    table.insert(options, {
-        title = 'Roll All Windows Down',
-        description = 'Lower all windows at once',
-        icon = 'arrows-down-to-line',
-        onSelect = function()
-            for _, window in ipairs(windows) do
-                RollDownWindow(vehicle, window.index)
-            end
-            lib.notify({
-                title = 'All Windows Down',
-                description = 'All windows rolled down',
-                type = 'success',
-                duration = 2000
-            })
-            OpenWindowControlsMenu()
-        end
-    })
-
-    table.insert(options, {
-        title = 'Roll All Windows Up',
-        description = 'Raise all windows at once',
-        icon = 'arrows-up-to-line',
-        onSelect = function()
-            for _, window in ipairs(windows) do
-                RollUpWindow(vehicle, window.index)
-            end
-            lib.notify({
-                title = 'All Windows Up',
-                description = 'All windows rolled up',
-                type = 'success',
-                duration = 2000
-            })
-            OpenWindowControlsMenu()
-        end
-    })
-
-    -- Smash window option (for emergency extraction)
-    table.insert(options, {
-        title = 'Smash Window',
-        description = 'Break a window (for emergency extraction)',
-        icon = 'hammer',
-        onSelect = function()
-            local smashOptions = {}
-            for _, window in ipairs(windows) do
-                local windowIndex = window.index
-                table.insert(smashOptions, {
-                    title = window.title,
-                    onSelect = function()
-                        SmashVehicleWindow(vehicle, windowIndex)
-                        lib.notify({
-                            title = 'Window Smashed',
-                            description = window.title .. ' broken',
-                            type = 'warning',
-                            duration = 2000
-                        })
-                    end
-                })
-            end
-            lib.registerContext({
-                id = 'SmashWindowMenu',
-                title = 'Select Window to Smash',
-                options = smashOptions,
-                menu = 'WindowControlsMenu'
-            })
-            lib.showContext('SmashWindowMenu')
-        end
-    })
-
-    lib.registerContext({
-        id = 'WindowControlsMenu',
-        title = 'Window Controls',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('WindowControlsMenu')
-end
-
------------------------------------------------------------
--- SEAT CONTROLS MENU
--- Move between seats, eject passengers
------------------------------------------------------------
-function OpenSeatControlsMenu()
-    local playerPed = PlayerPedId()
-    local vehicle = GetVehiclePedIsIn(playerPed, false)
-
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Error',
-            description = 'You must be in a vehicle',
-            type = 'error',
-            duration = 3000
-        })
-        return
-    end
-
-    local maxSeats = GetVehicleMaxNumberOfPassengers(vehicle)
-    local currentSeat = nil
-
-    -- Find current seat
-    for i = -1, maxSeats - 1 do
-        if GetPedInVehicleSeat(vehicle, i) == playerPed then
-            currentSeat = i
-            break
-        end
-    end
-
-    local seatNames = {
-        [-1] = 'Driver',
-        [0] = 'Front Passenger',
-        [1] = 'Rear Left',
-        [2] = 'Rear Right',
-        [3] = 'Seat 5',
-        [4] = 'Seat 6',
-        [5] = 'Seat 7',
-        [6] = 'Seat 8'
-    }
-
-    local options = {}
-
-    -- Current seat info
-    table.insert(options, {
-        title = 'Current Seat: ' .. (seatNames[currentSeat] or 'Unknown'),
-        description = 'You are in this seat',
-        icon = 'user',
-        disabled = true
-    })
-
-    -- Shuffle to different seats
-    for i = -1, maxSeats - 1 do
-        if i ~= currentSeat then
-            local seatIndex = i
-            local seatName = seatNames[i] or ('Seat ' .. (i + 2))
-            local occupant = GetPedInVehicleSeat(vehicle, i)
-            local isOccupied = occupant ~= 0 and occupant ~= playerPed
-
-            table.insert(options, {
-                title = 'Move to ' .. seatName,
-                description = isOccupied and 'Seat is occupied' or 'Click to move here',
-                icon = isOccupied and 'user-lock' or 'arrow-right',
-                disabled = isOccupied,
-                onSelect = function()
-                    if not isOccupied then
-                        SetPedIntoVehicle(playerPed, vehicle, seatIndex)
-                        lib.notify({
-                            title = 'Seat Changed',
-                            description = 'Moved to ' .. seatName,
-                            type = 'success',
-                            duration = 2000
-                        })
-                        Wait(500)
-                        OpenSeatControlsMenu()
-                    end
-                end
-            })
-        end
-    end
-
-    -- Passenger management section
-    table.insert(options, {
-        title = '── Passenger Management ──',
-        disabled = true
-    })
-
-    -- Eject passengers
-    local hasPassengers = false
-    for i = -1, maxSeats - 1 do
-        local occupant = GetPedInVehicleSeat(vehicle, i)
-        if occupant ~= 0 and occupant ~= playerPed then
-            hasPassengers = true
-            local seatIndex = i
-            local seatName = seatNames[i] or ('Seat ' .. (i + 2))
-            local isNPC = not IsPedAPlayer(occupant)
-
-            table.insert(options, {
-                title = 'Eject from ' .. seatName,
-                description = isNPC and 'Remove NPC from vehicle' or 'Remove player from vehicle',
-                icon = 'right-from-bracket',
-                onSelect = function()
-                    TaskLeaveVehicle(occupant, vehicle, 16)
-                    lib.notify({
-                        title = 'Passenger Ejected',
-                        description = 'Removed from ' .. seatName,
-                        type = 'warning',
-                        duration = 2000
-                    })
-                    Wait(1000)
-                    OpenSeatControlsMenu()
-                end
-            })
-        end
-    end
-
-    if not hasPassengers then
-        table.insert(options, {
-            title = 'No Passengers',
-            description = 'Vehicle has no other occupants',
-            icon = 'user-slash',
-            disabled = true
-        })
-    end
-
-    -- Eject all passengers
-    if hasPassengers then
-        table.insert(options, {
-            title = 'Eject All Passengers',
-            description = 'Remove everyone except driver',
-            icon = 'users-slash',
-            onSelect = function()
-                for i = 0, maxSeats - 1 do
-                    local occupant = GetPedInVehicleSeat(vehicle, i)
-                    if occupant ~= 0 and occupant ~= playerPed then
-                        TaskLeaveVehicle(occupant, vehicle, 16)
-                    end
-                end
-                lib.notify({
-                    title = 'All Passengers Ejected',
-                    description = 'Vehicle cleared',
-                    type = 'warning',
-                    duration = 2000
-                })
-                Wait(1000)
-                OpenSeatControlsMenu()
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'SeatControlsMenu',
-        title = 'Seat Controls',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('SeatControlsMenu')
-end
-
--- Appearance Menu
-function OpenAppearanceMenu()
-    local options = {
-        {
-            title = 'Colors',
-            description = 'Change vehicle colors.',
-            icon = 'droplet',
-            onSelect = function()
-                OpenColorsMenu()
-            end
-        },
-        {
-            title = 'Wheels',
-            description = 'Change vehicle wheels.',
-            icon = 'circle-notch',
-            onSelect = function()
-                OpenWheelsMenu()
-            end
-        },
-        {
-            title = 'Windows',
-            description = 'Apply window tint.',
-            icon = 'sun',
-            onSelect = function()
-                OpenWindowTintMenu()
-            end
-        },
-        {
-            title = 'Neon Lights',
-            description = 'Customize neon lights.',
-            icon = 'lightbulb',
-            onSelect = function()
-                OpenNeonMenu()
-            end
-        }
-    }
-
-    lib.registerContext({
-        id = 'AppearanceMenu',
-        title = 'Vehicle Appearance',
-        options = options,
-        menu = 'VehicleModMenu'
-    })
-    lib.showContext('AppearanceMenu')
-end
-
--- Window Tint Menu
-function OpenWindowTintMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    
-    local tintOptions = {
-        { name = "None", tint = 0 },
-        { name = "Pure Black", tint = 1 },
-        { name = "Dark Smoke", tint = 2 },
-        { name = "Light Smoke", tint = 3 },
-        { name = "Stock", tint = 4 },
-        { name = "Limo", tint = 5 },
-        { name = "Green", tint = 6 }
-    }
-    
-    local options = {}
-    local currentTint = GetVehicleWindowTint(vehicle)
-    
-    for _, tintOption in pairs(tintOptions) do
-        local isActive = (currentTint == tintOption.tint)
-        table.insert(options, {
-            title = tintOption.name,
-            description = 'Apply ' .. tintOption.name .. ' window tint',
-            metadata = {
-                {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleWindowTint(vehicle, tintOption.tint)
-                lib.notify({
-                    title = 'Window Tint Applied',
-                    description = 'Applied ' .. tintOption.name .. ' window tint',
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenWindowTintMenu()
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'WindowTintMenu',
-        title = 'Window Tint',
-        options = options,
-        menu = 'AppearanceMenu',
-        onBack = function()
-            OpenAppearanceMenu()
-        end
-    })
-    lib.showContext('WindowTintMenu')
-end
-
--- Neon Menu
-function OpenNeonMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    
-    local options = {
-        {
-            title = 'Toggle Neon',
-            description = 'Turn neon lights on/off',
-            icon = 'power-off',
-            onSelect = function()
-                local hasNeon = false
-                for i = 0, 3 do
-                    if IsVehicleNeonLightEnabled(vehicle, i) then
-                        hasNeon = true
-                        break
-                    end
-                end
-                
-                for i = 0, 3 do
-                    SetVehicleNeonLightEnabled(vehicle, i, not hasNeon)
-                end
-                
-                lib.notify({
-                    title = 'Neon Lights',
-                    description = hasNeon and 'Neon lights turned off' or 'Neon lights turned on',
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenNeonMenu()
-            end
-        },
-        {
-            title = 'Neon Layout',
-            description = 'Choose which neon lights to enable',
-            icon = 'table-cells-large',
-            onSelect = function()
-                OpenNeonLayoutMenu()
-            end
-        },
-        {
-            title = 'Neon Color',
-            description = 'Change the color of neon lights',
-            icon = 'palette',
-            onSelect = function()
-                OpenNeonColorMenu()
-            end
-        }
-    }
-
-    lib.registerContext({
-        id = 'NeonMenu',
-        title = 'Neon Lights',
-        options = options,
-        menu = 'AppearanceMenu',
-        onBack = function()
-            OpenAppearanceMenu()
-        end
-    })
-    lib.showContext('NeonMenu')
-end
-
--- Neon Layout Menu
-function OpenNeonLayoutMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    
-    local neonOptions = {
-        { name = "Front", index = 2 },
-        { name = "Back", index = 3 },
-        { name = "Left", index = 0 },
-        { name = "Right", index = 1 },
-        { name = "All", index = -1 }
-    }
-    
-    local options = {}
-    
-    for _, neonOption in pairs(neonOptions) do
-        local isEnabled = neonOption.index == -1 and false or IsVehicleNeonLightEnabled(vehicle, neonOption.index)
-        
-        table.insert(options, {
-            title = neonOption.name,
-            description = isEnabled and 'Turn off ' .. neonOption.name .. ' neon' or 'Turn on ' .. neonOption.name .. ' neon',
-            metadata = {
-                {label = 'Status', value = isEnabled and 'Enabled' or 'Disabled'}
-            },
-            onSelect = function()
-                if neonOption.index == -1 then
-                    local allEnabled = IsVehicleNeonLightEnabled(vehicle, 0)
-                    for i = 0, 3 do
-                        SetVehicleNeonLightEnabled(vehicle, i, not allEnabled)
-                    end
-                else
-                    SetVehicleNeonLightEnabled(vehicle, neonOption.index, not isEnabled)
-                end
-                
-                lib.notify({
-                    title = 'Neon Layout Updated',
-                    description = 'Updated ' .. neonOption.name .. ' neon setting',
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenNeonLayoutMenu()
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'NeonLayoutMenu',
-        title = 'Neon Layout',
-        options = options,
-        menu = 'NeonMenu',
-        onBack = function()
-            OpenNeonMenu()
-        end
-    })
-    lib.showContext('NeonLayoutMenu')
-end
-
--- Neon Color Menu
-function OpenNeonColorMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    
-    local colorOptions = {
-        { name = "White", r = 255, g = 255, b = 255 },
-        { name = "Blue", r = 0, g = 0, b = 255 },
-        { name = "Electric Blue", r = 0, g = 150, b = 255 },
-        { name = "Mint Green", r = 50, g = 255, b = 155 },
-        { name = "Lime Green", r = 0, g = 255, b = 0 },
-        { name = "Yellow", r = 255, g = 255, b = 0 },
-        { name = "Gold", r = 204, g = 204, b = 0 },
-        { name = "Orange", r = 255, g = 128, b = 0 },
-        { name = "Red", r = 255, g = 0, b = 0 },
-        { name = "Pony Pink", r = 255, g = 0, b = 255 },
-        { name = "Hot Pink", r = 255, g = 0, b = 150 },
-        { name = "Purple", r = 153, g = 0, b = 153 }
-    }
-    
-    local options = {}
-    local currentR, currentG, currentB = GetVehicleNeonLightsColour(vehicle)
-    
-    for _, colorOption in pairs(colorOptions) do
-        local isActive = (currentR == colorOption.r and currentG == colorOption.g and currentB == colorOption.b)
-        
-        table.insert(options, {
-            title = colorOption.name,
-            description = 'Apply ' .. colorOption.name .. ' neon color',
-            metadata = {
-                {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleNeonLightsColour(vehicle, colorOption.r, colorOption.g, colorOption.b)
-                lib.notify({
-                    title = 'Neon Color Applied',
-                    description = 'Applied ' .. colorOption.name .. ' neon color',
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenNeonColorMenu()
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'NeonColorMenu',
-        title = 'Neon Colors',
-        options = options,
-        menu = 'NeonMenu',
-        onBack = function()
-            OpenNeonMenu()
-        end
-    })
-    lib.showContext('NeonColorMenu')
-end
-
--- Colors Menu
-function OpenColorsMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    local primaryColor, secondaryColor = GetVehicleColours(vehicle)
-    
-    local colorOptions = {
-        { name = "Black", color = 0 },
-        { name = "Carbon Black", color = 147 },
-        { name = "Graphite", color = 1 },
-        { name = "Black Steel", color = 2 },
-        { name = "Dark Steel", color = 3 },
-        { name = "Silver", color = 4 },
-        { name = "Red", color = 27 },
-        { name = "Torino Red", color = 28 },
-        { name = "Formula Red", color = 29 },
-        { name = "Blue", color = 64 },
-        { name = "Dark Blue", color = 62 },
-        { name = "White", color = 111 },
-        { name = "Frost White", color = 112 }
-    }
-
-    local options = {
-        {
-            title = 'Primary Color',
-            description = 'Change the primary color of the vehicle.',
-            icon = 'droplet',
-            menu = 'primary_color',
-        },
-        {
-            title = 'Secondary Color',
-            description = 'Change the secondary color of the vehicle.',
-            icon = 'fill-drip',
-            menu = 'secondary_color',
-        },
-        {
-            title = 'Pearlescent Color',
-            description = 'Apply pearlescent finish.',
-            icon = 'gem',
-            onSelect = function()
-                OpenPearlescentMenu()
-            end
-        }
-    }
-
-    lib.registerContext({
-        id = 'ColorsMenu',
-        title = 'Vehicle Colors',
-        options = options,
-        menu = 'AppearanceMenu',
-        onBack = function()
-            OpenAppearanceMenu()
-        end
-    })
-
-    -- Generate primary color menu options
-    local primaryOptions = {}
-    for _, colorOption in pairs(colorOptions) do
-        table.insert(primaryOptions, {
-            title = colorOption.name,
-            description = 'Set primary color to ' .. colorOption.name,
-            metadata = {
-                {label = 'Status', value = (primaryColor == colorOption.color) and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleColours(vehicle, colorOption.color, secondaryColor)
-                lib.notify({
-                    title = 'Color Applied',
-                    description = 'Primary color set to ' .. colorOption.name,
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenColorsMenu()
-            end
-        })
-    end
-
-    -- Generate secondary color menu options
-    local secondaryOptions = {}
-    for _, colorOption in pairs(colorOptions) do
-        table.insert(secondaryOptions, {
-            title = colorOption.name,
-            description = 'Set secondary color to ' .. colorOption.name,
-            metadata = {
-                {label = 'Status', value = (secondaryColor == colorOption.color) and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleColours(vehicle, primaryColor, colorOption.color)
-                lib.notify({
-                    title = 'Color Applied',
-                    description = 'Secondary color set to ' .. colorOption.name,
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenColorsMenu()
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'primary_color',
-        title = 'Primary Colors',
-        menu = 'ColorsMenu',
-        options = primaryOptions,
-        onBack = function()
-            OpenColorsMenu()
-        end
-    })
-
-    lib.registerContext({
-        id = 'secondary_color',
-        title = 'Secondary Colors',
-        menu = 'ColorsMenu',
-        options = secondaryOptions,
-        onBack = function()
-            OpenColorsMenu()
-        end
-    })
-
-    lib.showContext('ColorsMenu')
-end
-
--- Pearlescent Color Menu
-function OpenPearlescentMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    local pearlescentColor, wheelColor = GetVehicleExtraColours(vehicle)
-    
-    local pearlescentOptions = {
-        { name = "Black", color = 0 },
-        { name = "Carbon Black", color = 147 },
-        { name = "Graphite", color = 1 },
-        { name = "Black Steel", color = 2 },
-        { name = "Dark Steel", color = 3 },
-        { name = "Silver", color = 4 },
-        { name = "Red", color = 27 },
-        { name = "Torino Red", color = 28 },
-        { name = "Formula Red", color = 29 },
-        { name = "Blue", color = 64 },
-        { name = "Dark Blue", color = 62 },
-        { name = "White", color = 111 },
-        { name = "Frost White", color = 112 }
-    }
-
-    local options = {}
-    
-    for _, colorOption in pairs(pearlescentOptions) do
-        local isActive = (pearlescentColor == colorOption.color)
-        
-        table.insert(options, {
-            title = colorOption.name,
-            description = 'Set pearlescent color to ' .. colorOption.name,
-            metadata = {
-                {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleExtraColours(vehicle, colorOption.color, wheelColor)
-                lib.notify({
-                    title = 'Pearlescent Applied',
-                    description = 'Pearlescent color set to ' .. colorOption.name,
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenPearlescentMenu()
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'PearlescentMenu',
-        title = 'Pearlescent Colors',
-        options = options,
-        menu = 'ColorsMenu',
-        onBack = function()
-            OpenColorsMenu()
-        end
-    })
-    lib.showContext('PearlescentMenu')
-end
-
--- Wheels Menu
-function OpenWheelsMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-
-    -- IMPORTANT: Must set mod kit before accessing vehicle mods
-    SetVehicleModKit(vehicle, 0)
-
-    local wheelType = GetVehicleWheelType(vehicle)
-
-    local wheelTypeOptions = {
-        { name = "Sport", type = 0 },
-        { name = "Muscle", type = 1 },
-        { name = "Lowrider", type = 2 },
-        { name = "SUV", type = 3 },
-        { name = "Offroad", type = 4 },
-        { name = "Tuner", type = 5 },
-        { name = "Bike Wheels", type = 6 },
-        { name = "High End", type = 7 }
-    }
-    
-    local options = {}
-    
-    for _, wheelOption in pairs(wheelTypeOptions) do
-        local isActive = (wheelType == wheelOption.type)
-        
-        table.insert(options, {
-            title = wheelOption.name,
-            description = 'Switch to ' .. wheelOption.name .. ' wheels',
-            metadata = {
-                {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleWheelType(vehicle, wheelOption.type)
-                lib.notify({
-                    title = 'Wheel Type Changed',
-                    description = 'Changed to ' .. wheelOption.name .. ' wheels',
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenWheelSelectionMenu(wheelOption.type)
-            end
-        })
-    end
-
-    -- Add wheel color option
-    table.insert(options, {
-        title = 'Wheel Color',
-        description = 'Change the color of wheels',
-        icon = 'fill-drip',
-        onSelect = function()
-            OpenWheelColorMenu()
-        end
-    })
-
-    lib.registerContext({
-        id = 'WheelsMenu',
-        title = 'Vehicle Wheels',
-        options = options,
-        menu = 'AppearanceMenu',
-        onBack = function()
-            OpenAppearanceMenu()
-        end
-    })
-    lib.showContext('WheelsMenu')
-end
-
--- Wheel Style Selection Menu
-function OpenWheelSelectionMenu(wheelType)
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-
-    -- IMPORTANT: Must set mod kit before accessing vehicle mods
-    SetVehicleModKit(vehicle, 0)
-
-    local options = {}
-
-    -- Get the number of wheel mods available
-    local numWheels = GetNumVehicleMods(vehicle, 23) -- 23 = wheels
-    local currentWheel = GetVehicleMod(vehicle, 23)
-    
-    for i = -1, numWheels - 1 do
-        local title = i == -1 and "Stock Wheels" or "Wheel " .. (i + 1)
-        local isActive = (currentWheel == i)
-        
-        table.insert(options, {
-            title = title,
-            metadata = {
-                {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleMod(vehicle, 23, i, GetVehicleModVariation(vehicle, 23))
-                if GetVehicleClass(vehicle) == 8 then -- Motorcycle
-                    SetVehicleMod(vehicle, 24, i, GetVehicleModVariation(vehicle, 24))
-                end
-                
-                lib.notify({
-                    title = 'Wheels Changed',
-                    description = 'Applied ' .. title,
-                    type = 'success',
-                    duration = 5000
-                })
-                
-                OpenWheelSelectionMenu(wheelType)
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'WheelSelectionMenu',
-        title = 'Select Wheels',
-        options = options,
-        menu = 'WheelsMenu',
-        onBack = function()
-            OpenWheelsMenu()
-        end
-    })
-    lib.showContext('WheelSelectionMenu')
-end
-
--- Wheel Color Menu
-function OpenWheelColorMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-    local pearlescent, wheelColor = GetVehicleExtraColours(vehicle)
-    
-    local colorOptions = {
-        { name = "Black", color = 0 },
-        { name = "Carbon Black", color = 147 },
-        { name = "Graphite", color = 1 },
-        { name = "Dark Steel", color = 3 },
-        { name = "Silver", color = 4 },
-        { name = "Red", color = 27 },
-        { name = "Blue", color = 64 },
-        { name = "White", color = 111 }
-    }
-
-    local options = {}
-    
-    for _, colorOption in pairs(colorOptions) do
-        local isActive = (wheelColor == colorOption.color)
-        
-        table.insert(options, {
-            title = colorOption.name,
-            description = 'Set wheel color to ' .. colorOption.name,
-            metadata = {
-                {label = 'Status', value = isActive and 'Active' or 'Inactive'}
-            },
-            onSelect = function()
-                SetVehicleExtraColours(vehicle, pearlescent, colorOption.color)
-                lib.notify({
-                    title = 'Wheel Color Applied',
-                    description = 'Wheel color set to ' .. colorOption.name,
-                    type = 'success',
-                    duration = 5000
-                })
-                OpenWheelColorMenu()
-            end
-        })
-    end
-
-    lib.registerContext({
-        id = 'WheelColorMenu',
-        title = 'Wheel Colors',
-        options = options,
-        menu = 'WheelsMenu',
-        onBack = function()
-            OpenWheelsMenu()
-        end
-    })
-    lib.showContext('WheelColorMenu')
-end
-
--- Save Vehicle Configuration with enhanced error handling
-function SaveVehicleConfig()
-    local vehicle = GetMenuVehicle()
-    
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Error',
-            description = 'Get in or stand beside the vehicle to save its configuration',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    local vehicleProps = GetVehicleProperties(vehicle)
-    if not vehicleProps then
-        lib.notify({
-            title = 'Error',
-            description = 'Failed to read vehicle properties',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    local vehicleModel = GetEntityModel(vehicle)
-    local vehicleModelName = GetDisplayNameFromVehicleModel(vehicleModel)
-    
-    if not vehicleModelName or vehicleModelName == "" then
-        lib.notify({
-            title = 'Error',
-            description = 'Unable to identify vehicle model',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-    
-    -- Save to database via server
-    local success, jsonString = pcall(json.encode, vehicleProps)
-    if success then
-        TriggerServerEvent('vehiclemods:server:saveModifications', vehicleModelName, jsonString)
-        
-        lib.notify({
-            title = 'Configuration Saved',
-            description = 'Your vehicle configuration has been saved.',
-            type = 'success',
-            duration = 5000
-        })
-        TriggerEvent('vehiclemods:client:openVehicleModMenu')
-    else
-        lib.notify({
-            title = 'Error',
-            description = 'Failed to encode vehicle configuration',
-            type = 'error',
-            duration = 5000
-        })
-        print("^1ERROR:^0 JSON encoding failed: " .. tostring(jsonString))
-        TriggerEvent('vehiclemods:client:openVehicleModMenu')
-    end
-end
-
--- Function to get all vehicle properties
-function GetVehicleProperties(vehicle)
-    if not DoesEntityExist(vehicle) then
-        return nil
-    end
-    
-    -- Get the colors
-    local colorPrimary, colorSecondary = GetVehicleColours(vehicle)
-    local pearlescentColor, wheelColor = GetVehicleExtraColours(vehicle)
-    
-    -- Get neon status and color
-    local neonEnabled = {}
-    for i = 0, 3 do
-        neonEnabled[i] = IsVehicleNeonLightEnabled(vehicle, i)
-    end
-    local neonColor = {GetVehicleNeonLightsColour(vehicle)}
-    
-    -- Get extras
-    local extras = {}
-    for extraId = 0, 20 do
-        if DoesExtraExist(vehicle, extraId) then
-            extras[extraId] = IsVehicleExtraTurnedOn(vehicle, extraId)
-        end
-    end
-    
-    local tyreSmokeColor = {GetVehicleTyreSmokeColor(vehicle)}
-    local livery = GetVehicleLivery(vehicle)
-    local modLivery = GetVehicleMod(vehicle, 48)
-    
-    return {
-        model = GetEntityModel(vehicle),
-        plate = GetVehicleNumberPlateText(vehicle),
-        plateIndex = GetVehicleNumberPlateTextIndex(vehicle),
-        bodyHealth = GetVehicleBodyHealth(vehicle),
-        engineHealth = GetVehicleEngineHealth(vehicle),
-        tankHealth = GetVehiclePetrolTankHealth(vehicle),
-        fuelLevel = GetVehicleFuelLevel(vehicle),
-        dirtLevel = GetVehicleDirtLevel(vehicle),
-        color1 = colorPrimary,
-        color2 = colorSecondary,
-        pearlescentColor = pearlescentColor,
-        wheelColor = wheelColor,
-        wheels = GetVehicleWheelType(vehicle),
-        windowTint = GetVehicleWindowTint(vehicle),
-        neonEnabled = neonEnabled,
-        neonColor = neonColor,
-        extras = extras,
-        tyreSmokeColor = tyreSmokeColor,
-        modSpoilers = GetVehicleMod(vehicle, 0),
-        modFrontBumper = GetVehicleMod(vehicle, 1),
-        modRearBumper = GetVehicleMod(vehicle, 2),
-        modSideSkirt = GetVehicleMod(vehicle, 3),
-        modExhaust = GetVehicleMod(vehicle, 4),
-        modFrame = GetVehicleMod(vehicle, 5),
-        modGrille = GetVehicleMod(vehicle, 6),
-        modHood = GetVehicleMod(vehicle, 7),
-        modFender = GetVehicleMod(vehicle, 8),
-        modRightFender = GetVehicleMod(vehicle, 9),
-        modRoof = GetVehicleMod(vehicle, 10),
-        modEngine = GetVehicleMod(vehicle, 11),
-        modBrakes = GetVehicleMod(vehicle, 12),
-        modTransmission = GetVehicleMod(vehicle, 13),
-        modHorns = GetVehicleMod(vehicle, 14),
-        modSuspension = GetVehicleMod(vehicle, 15),
-        modArmor = GetVehicleMod(vehicle, 16),
-        modTurbo = IsToggleModOn(vehicle, 18),
-        modSmokeEnabled = IsToggleModOn(vehicle, 20),
-        modXenon = IsToggleModOn(vehicle, 22),
-        modFrontWheels = GetVehicleMod(vehicle, 23),
-        modBackWheels = GetVehicleMod(vehicle, 24),
-        modPlateHolder = GetVehicleMod(vehicle, 25),
-        modVanityPlate = GetVehicleMod(vehicle, 26),
-        modTrimA = GetVehicleMod(vehicle, 27),
-        modOrnaments = GetVehicleMod(vehicle, 28),
-        modDashboard = GetVehicleMod(vehicle, 29),
-        modDial = GetVehicleMod(vehicle, 30),
-        modDoorSpeaker = GetVehicleMod(vehicle, 31),
-        modSeats = GetVehicleMod(vehicle, 32),
-        modSteeringWheel = GetVehicleMod(vehicle, 33),
-        modShifterLeavers = GetVehicleMod(vehicle, 34),
-        modAPlate = GetVehicleMod(vehicle, 35),
-        modSpeakers = GetVehicleMod(vehicle, 36),
-        modTrunk = GetVehicleMod(vehicle, 37),
-        modHydrolic = GetVehicleMod(vehicle, 38),
-        modEngineBlock = GetVehicleMod(vehicle, 39),
-        modAirFilter = GetVehicleMod(vehicle, 40),
-        modStruts = GetVehicleMod(vehicle, 41),
-        modArchCover = GetVehicleMod(vehicle, 42),
-        modAerials = GetVehicleMod(vehicle, 43),
-        modTrimB = GetVehicleMod(vehicle, 44),
-        modTank = GetVehicleMod(vehicle, 45),
-        modWindows = GetVehicleMod(vehicle, 46),
-        modLivery = modLivery,
-        livery = livery
-    }
-end
-
-function LoadVehicleConfig(vehicle)
-    local vehicleModel = GetEntityModel(vehicle)
-    local vehicleModelName = GetDisplayNameFromVehicleModel(vehicleModel)
-    
-    if not vehicleModelName or vehicleModelName == "" then
-        return
-    end
-    
-    -- Request configuration from server
-    TriggerServerEvent('vehiclemods:server:requestVehicleConfig', vehicleModelName)
-end
-
--- Event handler to apply vehicle configuration from server
-RegisterNetEvent('vehiclemods:client:applyVehicleConfig')
-AddEventHandler('vehiclemods:client:applyVehicleConfig', function(vehicleModel, configJson)
-    -- Deliberately ped-based (NOT GetMenuVehicle): this config arrives for the
-    -- vehicle the player just entered, which may not be the last menu subject.
-    local vehicle = GetVehiclePedIsIn(PlayerPedId(), false)
-    
-    if vehicle == 0 then
-        return
-    end
-    
-    local success, vehicleProps = pcall(json.decode, configJson)
-    if not success or not vehicleProps then
-        if Config.Debug then
-            print("^1ERROR:^0 Failed to decode vehicle configuration")
-        end
-        return
-    end
-    
-    ApplyVehicleProperties(vehicle, vehicleProps)
-    
-    lib.notify({
-        title = 'Configuration Loaded',
-        description = 'Vehicle configuration has been applied.',
-        type = 'success',
-        duration = 5000
+        sections = wsSections(),
+        colourHex = colourHexMap(),
     })
 end)
 
--- Function to apply vehicle properties
-function ApplyVehicleProperties(vehicle, props)
-    if not DoesEntityExist(vehicle) or not props then
+RegisterNUICallback('ws:sheet', function(req, cb)
+    local section = type(req) == 'table' and req.section or nil
+    if type(section) ~= 'string' or #section > 40 then cb({ ok = false, reason = 'Unknown section.' }) return end
+    if not sectionAllowed(section) then cb({ ok = false, reason = 'That section is switched off.' }) return end
+    local veh = wsResolve(wsModel)
+    if not veh then cb({ ok = false, gone = true, reason = 'That vehicle is gone.' }) return end
+    local sheet = WorkshopClient.sheet(veh, section)
+    if not sheet then cb({ ok = false, reason = NOT_WIRED[section] or 'Nothing to change here.' }) return end
+    cb({ ok = true, sheet = sheet })
+end)
+
+RegisterNUICallback('ws:apply', function(req, cb)
+    if type(req) ~= 'table' then cb({ ok = false, reason = 'Nothing to apply.' }) return end
+    local section, key, value = req.section, req.key, req.value
+    if type(section) ~= 'string' or #section > 40 then cb({ ok = false, reason = 'Unknown section.' }) return end
+    if type(key) ~= 'string' or #key > 80 then cb({ ok = false, reason = 'Nothing to apply.' }) return end
+    local kind = type(value)
+    if kind ~= 'nil' and kind ~= 'boolean' and kind ~= 'number' and kind ~= 'string' and kind ~= 'table' then
+        cb({ ok = false, reason = 'That value makes no sense.' })
         return
     end
-    
-    -- Apply colors
-    if props.color1 and props.color2 then
-        SetVehicleColours(vehicle, props.color1, props.color2)
-    end
-    
-    if props.pearlescentColor and props.wheelColor then
-        SetVehicleExtraColours(vehicle, props.pearlescentColor, props.wheelColor)
-    end
-    
-    -- Apply window tint
-    if props.windowTint then
-        SetVehicleWindowTint(vehicle, props.windowTint)
-    end
-    
-    -- Apply wheels
-    if props.wheels then
-        SetVehicleWheelType(vehicle, props.wheels)
-    end
-    
-    -- Apply mods
-    local modTypes = {
-        {prop = 'modEngine', id = 11},
-        {prop = 'modBrakes', id = 12},
-        {prop = 'modTransmission', id = 13},
-        {prop = 'modSuspension', id = 15},
-        {prop = 'modArmor', id = 16},
-        {prop = 'modFrontWheels', id = 23},
-        {prop = 'modLivery', id = 48}
-    }
-    
-    for _, mod in pairs(modTypes) do
-        if props[mod.prop] and props[mod.prop] ~= -1 then
-            SetVehicleMod(vehicle, mod.id, props[mod.prop], false)
-        end
-    end
-    
-    -- Apply toggle mods
-    if props.modTurbo ~= nil then
-        ToggleVehicleMod(vehicle, 18, props.modTurbo)
-    end
-    
-    if props.modXenon ~= nil then
-        ToggleVehicleMod(vehicle, 22, props.modXenon)
-    end
-    
-    -- Apply neon
-    if props.neonEnabled then
-        for i = 0, 3 do
-            if props.neonEnabled[i] ~= nil then
-                SetVehicleNeonLightEnabled(vehicle, i, props.neonEnabled[i])
-            end
-        end
-    end
-    
-    if props.neonColor and props.neonColor[1] and props.neonColor[2] and props.neonColor[3] then
-        SetVehicleNeonLightsColour(vehicle, props.neonColor[1], props.neonColor[2], props.neonColor[3])
-    end
-    
-    -- Apply extras
-    if props.extras then
-        for extraId, enabled in pairs(props.extras) do
-            if DoesExtraExist(vehicle, tonumber(extraId)) then
-                SetVehicleExtra(vehicle, tonumber(extraId), enabled and 0 or 1)
-            end
-        end
-    end
-    
-    -- Apply livery
-    if props.livery and props.livery > -1 then
-        SetVehicleLivery(vehicle, props.livery)
-    end
-end
+    if not sectionAllowed(section) then cb({ ok = false, reason = 'That section is switched off.' }) return end
+    local veh = wsResolve(wsModel)
+    if not veh then cb({ ok = false, gone = true, reason = 'That vehicle is gone.' }) return end
 
--- Auto-load configuration when entering a vehicle
-CreateThread(function()
-    local lastVehicle = 0
-    
-    while true do
-        Wait(1000)
-        
-        local playerPed = PlayerPedId()
-        local vehicle = GetVehiclePedIsIn(playerPed, false)
-        
-        if vehicle ~= 0 and vehicle ~= lastVehicle then
-            -- Check if we're in a modification zone and it's an emergency vehicle
-            local playerCoords = GetEntityCoords(playerPed)
-            local inZone = Config.IsInModificationZone(playerCoords)
-            
-            if inZone and (not Config.EmergencyVehiclesOnly or Config.IsEmergencyVehicle(vehicle)) then
-                LoadVehicleConfig(vehicle)
-            end
-            
-            lastVehicle = vehicle
-        elseif vehicle == 0 then
-            lastVehicle = 0
-        end
-    end
+    local ok, message = WorkshopClient.apply(veh, section, key, value)
+    -- an apply may open an ox_lib dialog, which drops NUI focus on the way out
+    if isOpen then SetNuiFocus(true, true) end
+    -- extras and mods report their new state a frame later; answer from a timer so
+    -- the callback itself never yields
+    SetTimeout(ok and 50 or 0, function()
+        local sheet = DoesEntityExist(veh) and WorkshopClient.sheet(veh, section) or nil
+        cb({ ok = ok, message = message, sheet = sheet })
+    end)
 end)
 
-RegisterNetEvent('vehiclemods:client:updateCustomLiveries')
-AddEventHandler('vehiclemods:client:updateCustomLiveries', function(customLiveries)
-    Config.CustomLiveries = customLiveries
-    
-    if Config.Debug then
-        print("^2INFO:^0 Updated custom liveries configuration")
-    end
+-- A logout must leave nothing of the last character behind: the panel closes (so
+-- NUI focus is not held over the character screen) and every vehicle this file
+-- remembers is dropped.
+RegisterNetEvent('qbx_core:client:playerLoggedOut', function()
+    closePanel()
+    if WorkshopClient and WorkshopClient.clearVehicle then WorkshopClient.clearVehicle() end
+    wsVehicle, wsModel, lastSpawned = nil, nil, nil
 end)
 
--- Request custom liveries when resource starts
-AddEventHandler('onClientResourceStart', function(resourceName)
-    if GetCurrentResourceName() ~= resourceName then return end
-    
-    TriggerServerEvent('vehiclemods:server:requestCustomLiveries')
-end)
-
-CreateThread(function()
-    while true do
-        Wait(60000) -- Check every minute
-        
-        if loadedTextures then
-            local currentTime = GetGameTimer()
-            local toRemove = {}
-            
-            for textureDict, loadTime in pairs(loadedTextures) do
-                -- Remove textures loaded more than 5 minutes ago and not currently in use
-                if currentTime - loadTime > 300000 then
-                    local inUse = false
-                    
-                    -- Check if any active custom livery is using this texture
-                    if ActiveCustomLiveries then
-                        for _, liveryInfo in pairs(ActiveCustomLiveries) do
-                            if liveryInfo.dict == textureDict then
-                                inUse = true
-                                break
-                            end
-                        end
-                    end
-                    
-                    if not inUse and HasStreamedTextureDictLoaded(textureDict) then
-                        SetStreamedTextureDictAsNoLongerNeeded(textureDict)
-                        table.insert(toRemove, textureDict)
-                        
-                        if Config.Debug then
-                            print("^3INFO:^0 Cleaned up unused texture: " .. textureDict)
-                        end
-                    end
-                end
-            end
-            
-            -- Remove from tracking
-            for _, textureDict in pairs(toRemove) do
-                loadedTextures[textureDict] = nil
-            end
-        end
-    end
-end)
-
------------------------------------------------------------
--- ENHANCED REPAIR SYSTEM
--- Detailed damage assessment, component-specific repair,
--- immersive animations, and engine health tracking
------------------------------------------------------------
-
--- Get detailed vehicle damage report
-function GetVehicleDamageReport(vehicle)
-    local report = {
-        engineHealth = GetVehicleEngineHealth(vehicle),
-        bodyHealth = GetVehicleBodyHealth(vehicle),
-        tankHealth = GetVehiclePetrolTankHealth(vehicle),
-        dirtLevel = GetVehicleDirtLevel(vehicle),
-        tiresBurst = {},
-        windowsBroken = {},
-        doorsLost = {}
-    }
-
-    -- Check tires (0-3 for standard, 4-5 for bikes/6-wheelers)
-    for i = 0, 5 do
-        if IsVehicleTyreBurst(vehicle, i, false) then
-            table.insert(report.tiresBurst, i)
-        end
-    end
-
-    -- Check windows (0-7)
-    for i = 0, 7 do
-        if not IsVehicleWindowIntact(vehicle, i) then
-            table.insert(report.windowsBroken, i)
-        end
-    end
-
-    -- Check doors (0-5)
-    for i = 0, 5 do
-        if IsVehicleDoorDamaged(vehicle, i) then
-            table.insert(report.doorsLost, i)
-        end
-    end
-
-    -- Calculate overall condition percentage
-    local enginePct = math.max(0, report.engineHealth) / 10
-    local bodyPct = math.max(0, report.bodyHealth) / 10
-    local tankPct = math.max(0, report.tankHealth) / 10
-    report.overallCondition = math.floor((enginePct + bodyPct + tankPct) / 3)
-
-    -- Determine severity
-    if report.overallCondition > 70 then
-        report.severity = 'minor'
-        report.severityLabel = 'Minor Damage'
-    elseif report.overallCondition > 40 then
-        report.severity = 'moderate'
-        report.severityLabel = 'Moderate Damage'
-    elseif report.overallCondition > 15 then
-        report.severity = 'severe'
-        report.severityLabel = 'Severe Damage'
-    else
-        report.severity = 'critical'
-        report.severityLabel = 'Critical Damage'
-    end
-
-    return report
-end
-
--- Format damage report for display
-function FormatDamageReport(report)
-    local lines = {}
-
-    table.insert(lines, ('**Overall Condition:** %d%%'):format(report.overallCondition))
-    table.insert(lines, ('**Status:** %s'):format(report.severityLabel))
-    table.insert(lines, '')
-    table.insert(lines, ('Engine: %d%%'):format(math.floor(math.max(0, report.engineHealth) / 10)))
-    table.insert(lines, ('Body: %d%%'):format(math.floor(math.max(0, report.bodyHealth) / 10)))
-    table.insert(lines, ('Fuel Tank: %d%%'):format(math.floor(math.max(0, report.tankHealth) / 10)))
-
-    if #report.tiresBurst > 0 then
-        table.insert(lines, ('Flat Tires: %d'):format(#report.tiresBurst))
-    end
-    if #report.windowsBroken > 0 then
-        table.insert(lines, ('Broken Windows: %d'):format(#report.windowsBroken))
-    end
-
-    return table.concat(lines, '\n')
-end
-
--- Emergency Repair System (Enhanced)
-function EmergencyRepairVehicle()
-    local playerPed = PlayerPedId()
-    local vehicle = GetMenuVehicle()
-
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Emergency Repair',
-            description = 'Get in or stand beside the vehicle to repair it',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-
-    -- Get detailed damage report
-    local damage = GetVehicleDamageReport(vehicle)
-
-    -- Check if vehicle needs repair
-    if damage.overallCondition > 70 then
-        lib.notify({
-            title = 'Emergency Repair',
-            description = 'Vehicle condition is good (' .. damage.overallCondition .. '%). No emergency repair needed.',
-            type = 'info',
-            duration = 5000
-        })
-        return
-    end
-
-    -- Show damage assessment dialog
-    local alert = lib.alertDialog({
-        header = 'Emergency Repair - Damage Assessment',
-        content = FormatDamageReport(damage) .. '\n\n**Warning:** Emergency repair provides limited functionality. Vehicle will have reduced power (30%) until full repair.',
-        centered = true,
-        cancel = true,
-        labels = {
-            confirm = 'Begin Emergency Repair',
-            cancel = 'Cancel'
-        }
-    })
-
-    if alert == 'confirm' then
-        -- Exit vehicle for the repair animation — only if actually inside
-        -- (on-foot ox_target flow starts beside the vehicle)
-        local wasInside = GetVehiclePedIsIn(playerPed, false) == vehicle
-        local wasDriver = wasInside and GetPedInVehicleSeat(vehicle, -1) == playerPed
-
-        if wasInside then
-            TaskLeaveVehicle(playerPed, vehicle, 0)
-            Wait(2000)
-        end
-
-        -- Play repair animation with proper scenario
-        lib.notify({
-            title = 'Emergency Repair',
-            description = 'Assessing damage and applying field repairs...',
-            type = 'info',
-            duration = 3000
-        })
-
-        -- Multi-stage repair with progress
-        local repairStages = {
-            { label = 'Checking engine...', duration = 3000 },
-            { label = 'Patching fuel system...', duration = 2500 },
-            { label = 'Stabilizing components...', duration = 2500 },
-            { label = 'Testing systems...', duration = 2000 }
-        }
-
-        local repairSuccess = true
-        for _, stage in ipairs(repairStages) do
-            if not lib.progressBar({
-                duration = stage.duration,
-                label = stage.label,
-                useWhileDead = false,
-                canCancel = true,
-                disable = { move = true, combat = true },
-                anim = {
-                    dict = 'mini@repair',
-                    clip = 'fixing_a_ped'
-                }
-            }) then
-                repairSuccess = false
-                break
-            end
-        end
-
-        if repairSuccess then
-            -- Charge only AFTER the work finished (review catch: charging
-            -- before a cancelable progress bar meant cancel = money gone).
-            -- Cost derived server-side; mechanics free, 25% emergency discount.
-            local paid, payMsg = lib.callback.await('vehiclemods:server:chargeRepair', false, 'emergency')
-            if not paid then
-                lib.notify({
-                    title = 'Emergency Repair',
-                    description = payMsg or 'Payment failed — no repairs applied',
-                    type = 'error',
-                    duration = 5000
-                })
-                if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-                TriggerEvent('vehiclemods:client:openVehicleModMenu')
-                return
-            end
-
-            -- Apply emergency repairs
-            SetVehicleEngineHealth(vehicle, 450.0)
-            SetVehicleBodyHealth(vehicle, 650.0)
-            SetVehiclePetrolTankHealth(vehicle, 800.0)
-
-            -- Fix flat tires (critical for mobility)
-            for i = 0, 5 do
-                if IsVehicleTyreBurst(vehicle, i, false) then
-                    SetVehicleTyreFixed(vehicle, i)
-                end
-            end
-
-            -- Reduce performance (emergency mode)
-            SetVehicleEnginePowerMultiplier(vehicle, 0.3)
-            SetVehicleEngineTorqueMultiplier(vehicle, 0.4)
-            SetVehicleCheatPowerIncrease(vehicle, 0.0)
-
-            -- Ensure engine runs
-            SetVehicleEngineOn(vehicle, true, true, false)
-            SetVehicleUndriveable(vehicle, false)
-
-            -- Get back in vehicle
-            Wait(500)
-            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-
-            -- Play success sound
-            PlaySoundFrontend(-1, "PICK_UP_WEAPON", "HUD_FRONTEND_CUSTOM_SOUNDSET", true)
-
-            lib.notify({
-                title = 'Emergency Repair Complete',
-                description = ('Vehicle at %d%% - Reduced power mode active. Seek full repair.'):format(
-                    math.floor((GetVehicleEngineHealth(vehicle) + GetVehicleBodyHealth(vehicle)) / 20)
-                ),
-                type = 'success',
-                duration = 8000
-            })
-
-            -- Periodic reminders
-            SetTimeout(60000, function()
-                if DoesEntityExist(vehicle) and GetVehiclePedIsIn(playerPed, false) == vehicle then
-                    lib.notify({
-                        title = 'Vehicle Warning',
-                        description = 'Emergency repairs are temporary. Full repair recommended.',
-                        type = 'warning',
-                        duration = 5000
-                    })
-                end
-            end)
-        else
-            lib.notify({
-                title = 'Repair Cancelled',
-                description = 'Emergency repair was interrupted',
-                type = 'error',
-                duration = 3000
-            })
-            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-        end
-
-        TriggerEvent('vehiclemods:client:openVehicleModMenu')
-    else
-        TriggerEvent('vehiclemods:client:openVehicleModMenu')
-    end
-end
-
--- Full Repair Function (Enhanced)
-function FullRepairVehicle()
-    local playerPed = PlayerPedId()
-    local vehicle = GetMenuVehicle()
-
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Full Repair',
-            description = 'Get in or stand beside the vehicle to repair it',
-            type = 'error',
-            duration = 5000
-        })
-        return
-    end
-
-    -- Get detailed damage report
-    local damage = GetVehicleDamageReport(vehicle)
-
-    -- Calculate repair time based on damage
-    local baseTime = 8000
-    local extraTime = math.floor((100 - damage.overallCondition) * 100) -- More damage = longer repair
-    local totalTime = baseTime + extraTime
-
-    -- Show damage assessment
-    local alert = lib.alertDialog({
-        header = 'Full Vehicle Repair',
-        content = FormatDamageReport(damage) .. ('\n\n**Estimated Repair Time:** %d seconds'):format(math.ceil(totalTime / 1000)),
-        centered = true,
-        cancel = true,
-        labels = {
-            confirm = 'Begin Full Repair',
-            cancel = 'Cancel'
-        }
-    })
-
-    if alert == 'confirm' then
-        -- Exit vehicle for the repair — only if actually inside
-        local wasInside = GetVehiclePedIsIn(playerPed, false) == vehicle
-        local wasDriver = wasInside and GetPedInVehicleSeat(vehicle, -1) == playerPed
-        if wasInside then
-            TaskLeaveVehicle(playerPed, vehicle, 0)
-            Wait(2000)
-        end
-
-        -- Multi-stage full repair
-        local stages = {
-            { label = 'Diagnosing vehicle systems...', duration = math.floor(totalTime * 0.15) },
-            { label = 'Repairing engine components...', duration = math.floor(totalTime * 0.25) },
-            { label = 'Fixing body damage...', duration = math.floor(totalTime * 0.20) },
-            { label = 'Replacing damaged parts...', duration = math.floor(totalTime * 0.20) },
-            { label = 'Calibrating systems...', duration = math.floor(totalTime * 0.10) },
-            { label = 'Final inspection...', duration = math.floor(totalTime * 0.10) }
-        }
-
-        local repairSuccess = true
-        for i, stage in ipairs(stages) do
-            if not lib.progressBar({
-                duration = stage.duration,
-                label = stage.label,
-                useWhileDead = false,
-                canCancel = true,
-                disable = { move = true, combat = true },
-                anim = {
-                    dict = 'mini@repair',
-                    clip = 'fixing_a_ped'
-                }
-            }) then
-                repairSuccess = false
-                break
-            end
-
-            -- (Incremental mid-stage repairs removed 2026-08-28: they applied
-            -- real fixes before payment, so canceling — or failing the charge —
-            -- after stage 2 still yielded a mostly-repaired vehicle for free.
-            -- All effects now apply only after payment clears below.)
-        end
-
-        if repairSuccess then
-            -- Charge only AFTER the work finished (no pay-for-cancel)
-            local paid, payMsg = lib.callback.await('vehiclemods:server:chargeRepair', false, 'full')
-            if not paid then
-                lib.notify({
-                    title = 'Full Repair',
-                    description = payMsg or 'Payment failed — no repairs applied',
-                    type = 'error',
-                    duration = 5000
-                })
-                if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-                TriggerEvent('vehiclemods:client:openVehicleModMenu')
-                return
-            end
-
-            -- Complete full repair
-            SetVehicleFixed(vehicle)
-            SetVehicleDeformationFixed(vehicle)
-            SetVehicleDirtLevel(vehicle, 0.0)
-            SetVehicleEngineHealth(vehicle, 1000.0)
-            SetVehicleBodyHealth(vehicle, 1000.0)
-            SetVehiclePetrolTankHealth(vehicle, 1000.0)
-
-            -- Restore full performance
-            SetVehicleEnginePowerMultiplier(vehicle, 1.0)
-            SetVehicleEngineTorqueMultiplier(vehicle, 1.0)
-            SetVehicleUndriveable(vehicle, false)
-            SetVehicleEngineOn(vehicle, true, true, false)
-
-            -- Get back in vehicle
-            Wait(500)
-            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-
-            -- Success sound
-            PlaySoundFrontend(-1, "SHOOTING_RANGE_ROUND_OVER", "HUD_AWARDS", true)
-
-            lib.notify({
-                title = 'Full Repair Complete',
-                description = 'Vehicle restored to 100% condition. All systems operational.',
-                type = 'success',
-                duration = 5000
-            })
-        else
-            lib.notify({
-                title = 'Repair Interrupted',
-                description = 'Repair cancelled — no changes applied and nothing charged.',
-                type = 'warning',
-                duration = 4000
-            })
-            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-        end
-
-        TriggerEvent('vehiclemods:client:openVehicleModMenu')
-    else
-        TriggerEvent('vehiclemods:client:openVehicleModMenu')
-    end
-end
-
------------------------------------------------------------
--- FIELD REPAIR SYSTEM (v2.1.0+)
--- Allows emergency repairs anywhere with toolkit
------------------------------------------------------------
-local pendingFieldRepair = nil
-
--- Request field repair from server
-function RequestFieldRepair()
-    local playerPed = PlayerPedId()
-    local vehicle = GetMenuVehicle()
-
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Field Repair',
-            description = 'Get in or stand beside the vehicle to repair it',
-            type = 'error',
-            duration = 3000
-        })
-        return
-    end
-
-    -- Check engine health
-    local engineHealth = GetVehicleEngineHealth(vehicle)
-    if engineHealth > 350.0 then
-        lib.notify({
-            title = 'Field Repair',
-            description = 'Engine is functional. Field repair not needed.',
-            type = 'info',
-            duration = 4000
-        })
-        return
-    end
-
-    -- Request validation from server
-    pendingFieldRepair = vehicle
-    TriggerServerEvent('vehiclemods:server:requestFieldRepair')
-end
-
--- Handle field repair result from server
-RegisterNetEvent('vehiclemods:client:fieldRepairResult')
-AddEventHandler('vehiclemods:client:fieldRepairResult', function(approved, errorMsg, maxRepair, repairTime)
-    if not approved then
-        lib.notify({
-            title = 'Field Repair Denied',
-            description = errorMsg or 'Unable to perform field repair',
-            type = 'error',
-            duration = 5000
-        })
-        pendingFieldRepair = nil
-        return
-    end
-
-    local vehicle = pendingFieldRepair
-    pendingFieldRepair = nil
-
-    if not vehicle or not DoesEntityExist(vehicle) then
-        lib.notify({
-            title = 'Error',
-            description = 'Vehicle no longer exists',
-            type = 'error',
-            duration = 3000
-        })
-        return
-    end
-
-    -- Perform field repair (from inside or standing beside the vehicle)
-    local playerPed = PlayerPedId()
-    local wasInside = GetVehiclePedIsIn(playerPed, false) == vehicle
-    local wasDriver = wasInside and GetPedInVehicleSeat(vehicle, -1) == playerPed
-
-    if wasInside then
-        TaskLeaveVehicle(playerPed, vehicle, 0)
-        Wait(2000)
-    end
-
-    lib.notify({
-        title = 'Field Repair',
-        description = 'Using repair kit... Stand by.',
-        type = 'info',
-        duration = 3000
-    })
-
-    -- Single progress bar for field repair
-    local success = lib.progressBar({
-        duration = repairTime or 15000,
-        label = 'Performing field repair...',
-        useWhileDead = false,
-        canCancel = true,
-        disable = { move = true, combat = true },
-        anim = {
-            dict = 'mini@repair',
-            clip = 'fixing_a_ped'
-        }
-    })
-
-    if success then
-        -- Completion phase: server charges, consumes the kit and starts the
-        -- cooldown only now — a canceled progress bar cost nothing.
-        local ok, failMsg = lib.callback.await('vehiclemods:server:completeFieldRepair', false)
-        if not ok then
-            lib.notify({
-                title = 'Field Repair',
-                description = failMsg or 'Field repair could not be completed',
-                type = 'error',
-                duration = 5000
-            })
-            if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-            return
-        end
-
-        -- Apply limited repair
-        SetVehicleEngineHealth(vehicle, maxRepair or 350.0)
-        SetVehicleUndriveable(vehicle, false)
-        SetVehicleEngineOn(vehicle, true, true, false)
-
-        -- Fix flat tires only
-        for i = 0, 5 do
-            if IsVehicleTyreBurst(vehicle, i, true) then
-                SetVehicleTyreFixed(vehicle, i)
-            end
-        end
-
-        -- Reduced performance (field repair limitation)
-        SetVehicleEnginePowerMultiplier(vehicle, 0.5)
-        SetVehicleEngineTorqueMultiplier(vehicle, 0.5)
-
-        Wait(500)
-        if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-
-        PlaySoundFrontend(-1, "PICK_UP_WEAPON", "HUD_FRONTEND_CUSTOM_SOUNDSET", true)
-
-        lib.notify({
-            title = 'Field Repair Complete',
-            description = ('Engine at %d%%. Reduced power. Seek full repair.'):format(math.floor(maxRepair / 10)),
-            type = 'success',
-            duration = 6000
-        })
-    else
-        lib.notify({
-            title = 'Repair Cancelled',
-            description = 'Field repair interrupted',
-            type = 'error',
-            duration = 3000
-        })
-        if wasInside then TaskWarpPedIntoVehicle(playerPed, vehicle, wasDriver and -1 or 0) end
-    end
-end)
-
------------------------------------------------------------
--- PRESET SYSTEM (v2.1.0+)
--- Save and load vehicle configuration presets
------------------------------------------------------------
-local cachedPresets = {}
-
--- Get current vehicle configuration
-local function GetVehicleConfiguration(vehicle)
-    if not vehicle or vehicle == 0 then return nil end
-
-    SetVehicleModKit(vehicle, 0)
-
-    local config = {
-        livery = GetVehicleLivery(vehicle),
-        liveryMod = GetVehicleMod(vehicle, 48),
-        extras = {},
-        colors = {
-            primary = {GetVehicleColours(vehicle)},
-            extra = {GetVehicleExtraColours(vehicle)}
-        },
-        mods = {}
-    }
-
-    -- Get extras state
-    for i = 0, 20 do
-        if DoesExtraExist(vehicle, i) then
-            config.extras[i] = IsVehicleExtraTurnedOn(vehicle, i)
-        end
-    end
-
-    -- Get performance mods
-    for i = 0, 16 do
-        config.mods[i] = GetVehicleMod(vehicle, i)
-    end
-
-    return config
-end
-
--- Apply vehicle configuration
-local function ApplyVehicleConfiguration(vehicle, config)
-    if not vehicle or vehicle == 0 or not config then return end
-
-    SetVehicleModKit(vehicle, 0)
-
-    -- Apply livery
-    if config.livery and config.livery >= 0 then
-        SetVehicleLivery(vehicle, config.livery)
-    end
-    if config.liveryMod and config.liveryMod >= 0 then
-        SetVehicleMod(vehicle, 48, config.liveryMod, false)
-    end
-
-    -- Apply extras
-    if config.extras then
-        for i, state in pairs(config.extras) do
-            if DoesExtraExist(vehicle, tonumber(i)) then
-                SetVehicleExtra(vehicle, tonumber(i), not state)
-            end
-        end
-    end
-
-    -- Apply colors
-    if config.colors then
-        if config.colors.primary then
-            SetVehicleColours(vehicle, config.colors.primary[1], config.colors.primary[2])
-        end
-        if config.colors.extra then
-            SetVehicleExtraColours(vehicle, config.colors.extra[1], config.colors.extra[2])
-        end
-    end
-
-    -- Apply mods
-    if config.mods then
-        for modType, modIndex in pairs(config.mods) do
-            if modIndex >= 0 then
-                SetVehicleMod(vehicle, tonumber(modType), modIndex, false)
-            end
-        end
-    end
-end
-
--- Open preset menu
-function OpenPresetMenu()
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then
-        lib.notify({
-            title = 'Error',
-            description = 'You must be in a vehicle',
-            type = 'error',
-            duration = 3000
-        })
-        return
-    end
-
-    local vehicleModel = GetDisplayNameFromVehicleModel(GetEntityModel(vehicle))
-
-    -- Request presets from server
-    TriggerServerEvent('vehiclemods:server:loadPresets', vehicleModel)
-
-    -- Show loading
-    lib.notify({
-        title = 'Loading Presets',
-        description = 'Fetching saved configurations...',
-        type = 'info',
-        duration = 2000
-    })
-end
-
--- Handle received presets
-RegisterNetEvent('vehiclemods:client:receivePresets')
-AddEventHandler('vehiclemods:client:receivePresets', function(presets)
-    cachedPresets = presets or {}
-
-    local vehicle = GetMenuVehicle()
-    if vehicle == 0 then return end
-
-    local vehicleModel = GetDisplayNameFromVehicleModel(GetEntityModel(vehicle))
-    local options = {}
-
-    -- Save new preset option
-    table.insert(options, {
-        title = 'Save New Preset',
-        description = 'Save current configuration as a preset',
-        icon = 'floppy-disk',
-        onSelect = function()
-            local input = lib.inputDialog('Save Preset', {
-                { type = 'input', label = 'Preset Name', required = true, max = 50 },
-                { type = 'checkbox', label = 'Share with Job (Fleet Preset)' }
-            })
-
-            if input then
-                local config = GetVehicleConfiguration(vehicle)
-                TriggerServerEvent('vehiclemods:server:savePreset', input[1], vehicleModel, config, input[2])
-            end
-        end
-    })
-
-    -- List existing presets
-    if #cachedPresets > 0 then
-        table.insert(options, {
-            title = '─── Saved Presets ───',
-            disabled = true
-        })
-
-        for _, preset in ipairs(cachedPresets) do
-            local icon = preset.isJobPreset and 'users' or 'user'
-            local suffix = preset.isJobPreset and ' [Fleet]' or ''
-
-            table.insert(options, {
-                title = preset.name .. suffix,
-                description = preset.isOwner and 'Click to apply, right-click to delete' or 'Click to apply',
-                icon = icon,
-                onSelect = function()
-                    ApplyVehicleConfiguration(vehicle, preset.data)
-                    lib.notify({
-                        title = 'Preset Applied',
-                        description = ('Applied "%s"'):format(preset.name),
-                        type = 'success',
-                        duration = 3000
-                    })
-                end,
-                menu = preset.isOwner and 'preset_delete_' .. preset.name or nil
-            })
-
-            -- Create delete submenu for owned presets
-            if preset.isOwner then
-                lib.registerContext({
-                    id = 'preset_delete_' .. preset.name,
-                    title = 'Delete ' .. preset.name .. '?',
-                    menu = 'PresetMenu',
-                    options = {
-                        {
-                            title = 'Confirm Delete',
-                            description = 'This cannot be undone',
-                            icon = 'trash',
-                            onSelect = function()
-                                TriggerServerEvent('vehiclemods:server:deletePreset', preset.name, vehicleModel)
-                                Wait(500)
-                                OpenPresetMenu()
-                            end
-                        },
-                        {
-                            title = 'Cancel',
-                            icon = 'xmark',
-                            onSelect = function()
-                                lib.showContext('PresetMenu')
-                            end
-                        }
-                    }
-                })
-            end
-        end
-    else
-        table.insert(options, {
-            title = 'No Presets Saved',
-            description = 'Save your first preset using the option above',
-            icon = 'circle-info',
-            disabled = true
-        })
-    end
-
-    -- Back button
-    table.insert(options, {
-        title = 'Back',
-        icon = 'arrow-left',
-        onSelect = function()
-            TriggerEvent('vehiclemods:client:openVehicleModMenu')
-        end
-    })
-
-    lib.registerContext({
-        id = 'PresetMenu',
-        title = vehicleModel .. ' Presets',
-        options = options
-    })
-    lib.showContext('PresetMenu')
-end)
-
------------------------------------------------------------
--- LIVERY MEMORY SYSTEM (v2.1.0+)
--- Auto-apply last used livery when entering vehicles
------------------------------------------------------------
-local lastVehicle = 0
-local appliedMemoryThisSession = {}
-
--- Save current livery to memory
-function SaveLiveryToMemory(vehicle)
-    if not Config.AutoApplyLivery or not Config.AutoApplyLivery.enabled then return end
-    if not vehicle or vehicle == 0 then return end
-
-    local vehicleModel = GetDisplayNameFromVehicleModel(GetEntityModel(vehicle)):lower()
-    local liveryIndex = GetVehicleLivery(vehicle)
-    local liveryMod = GetVehicleMod(vehicle, 48)
-
-    -- Get extras state if configured
-    local extras = nil
-    if Config.AutoApplyLivery.rememberExtras then
-        extras = {}
-        for i = 0, 20 do
-            if DoesExtraExist(vehicle, i) then
-                extras[tostring(i)] = IsVehicleExtraTurnedOn(vehicle, i)
-            end
-        end
-    end
-
-    -- Get custom livery if active
-    local netId = NetworkGetNetworkIdFromEntity(vehicle)
-    local customLivery = ActiveCustomLiveries[netId]
-
-    TriggerServerEvent('vehiclemods:server:saveLiveryMemory',
-        vehicleModel, liveryIndex, liveryMod, customLivery, extras)
-end
-
--- Handle livery memory from server
-RegisterNetEvent('vehiclemods:client:applyLiveryMemory')
-AddEventHandler('vehiclemods:client:applyLiveryMemory', function(vehicleModel, memory)
-    if not Config.AutoApplyLivery or not Config.AutoApplyLivery.enabled then return end
-
-    local playerPed = PlayerPedId()
-    local vehicle = GetVehiclePedIsIn(playerPed, false)
-
-    if vehicle == 0 then return end
-
-    local currentModel = GetDisplayNameFromVehicleModel(GetEntityModel(vehicle)):lower()
-    if currentModel ~= vehicleModel:lower() then return end
-
-    -- Check if already applied this session
-    local netId = NetworkGetNetworkIdFromEntity(vehicle)
-    if appliedMemoryThisSession[netId] then return end
-    appliedMemoryThisSession[netId] = true
-
-    SetVehicleModKit(vehicle, 0)
-
-    -- Apply remembered livery
-    if memory.liveryIndex and memory.liveryIndex >= 0 then
-        SetVehicleLivery(vehicle, memory.liveryIndex)
-    end
-    if memory.liveryMod and memory.liveryMod >= 0 then
-        SetVehicleMod(vehicle, 48, memory.liveryMod, false)
-    end
-
-    -- Apply custom livery if remembered
-    if memory.customLivery then
-        TriggerEvent('vehiclemods:client:setCustomLivery',
-            netId, currentModel, memory.customLivery)
-    end
-
-    -- Apply extras
-    if memory.extras then
-        for i, state in pairs(memory.extras) do
-            if DoesExtraExist(vehicle, tonumber(i)) then
-                SetVehicleExtra(vehicle, tonumber(i), not state)
-            end
-        end
-    end
-
-    if Config.AutoApplyLivery.notifyOnApply then
-        lib.notify({
-            title = 'Livery Applied',
-            description = 'Previous configuration restored',
-            type = 'success',
-            duration = 2500
-        })
-    end
-
-    if Config.Debug then
-        print(("^2[LIVERY-MEMORY]:^0 Applied saved livery for %s"):format(vehicleModel))
-    end
-end)
-
--- Track recently spawned vehicles (for jg-garages compatibility)
-local recentlySpawnedVehicles = {}
-
--- Monitor vehicle entry for auto-apply
-CreateThread(function()
-    while true do
-        Wait(1000)
-
-        if Config.AutoApplyLivery and Config.AutoApplyLivery.enabled then
-            local playerPed = PlayerPedId()
-            local vehicle = GetVehiclePedIsIn(playerPed, false)
-
-            -- Entered a new vehicle
-            if vehicle ~= 0 and vehicle ~= lastVehicle then
-                lastVehicle = vehicle
-
-                -- Check jg-scripts compatibility
-                local jgCompat = Config.Compatibility and Config.Compatibility['jg-scripts']
-                local shouldApply = true
-
-                if jgCompat and jgCompat.enabled and jgCompat.respectGarageLivery then
-                    local netId = NetworkGetNetworkIdFromEntity(vehicle)
-                    local spawnTime = recentlySpawnedVehicles[netId]
-
-                    if spawnTime then
-                        local elapsed = GetGameTimer() - spawnTime
-                        local gracePeriod = jgCompat.garageSpawnGracePeriod or 5000
-
-                        if elapsed < gracePeriod then
-                            -- Vehicle was recently spawned by garage, skip auto-apply
-                            shouldApply = false
-                            if Config.Debug then
-                                print(("^3[COMPAT]:^0 Skipping livery auto-apply (garage grace period: %dms remaining)"):format(gracePeriod - elapsed))
-                            end
-                        else
-                            -- Grace period expired, clean up
-                            recentlySpawnedVehicles[netId] = nil
-                        end
-                    end
-                end
-
-                if shouldApply and (Config.AutoApplyLivery.applyOnEnter or Config.AutoApplyLivery.applyOnSpawn) then
-                    local vehicleModel = GetDisplayNameFromVehicleModel(GetEntityModel(vehicle))
-                    TriggerServerEvent('vehiclemods:server:loadLiveryMemory', vehicleModel)
-                end
-            elseif vehicle == 0 then
-                lastVehicle = 0
-            end
-        end
-    end
-end)
-
--- Listen for garage vehicle spawns (jg-advancedgarages compatibility)
--- jg-advancedgarages triggers this when spawning a vehicle
-RegisterNetEvent('jg-advancedgarages:client:vehicleSpawned')
-AddEventHandler('jg-advancedgarages:client:vehicleSpawned', function(vehicle, plate)
-    if not vehicle or not DoesEntityExist(vehicle) then return end
-
-    local jgCompat = Config.Compatibility and Config.Compatibility['jg-scripts']
-    if jgCompat and jgCompat.enabled and jgCompat.respectGarageLivery then
-        local netId = NetworkGetNetworkIdFromEntity(vehicle)
-        recentlySpawnedVehicles[netId] = GetGameTimer()
-
-        if Config.Debug then
-            print(("^2[COMPAT]:^0 jg-garages spawned vehicle (plate: %s), applying grace period"):format(plate or "unknown"))
-        end
-    end
-end)
-
--- Alternative: Listen for QBCore garage spawns
-RegisterNetEvent('qb-garages:client:vehicleSpawned')
-AddEventHandler('qb-garages:client:vehicleSpawned', function(vehicle)
-    if not vehicle or not DoesEntityExist(vehicle) then return end
-
-    local qbCompat = Config.Compatibility and Config.Compatibility['qb-scripts']
-    if qbCompat and qbCompat.enabled and qbCompat.respectGarageLivery then
-        local netId = NetworkGetNetworkIdFromEntity(vehicle)
-        recentlySpawnedVehicles[netId] = GetGameTimer()
-    end
-end)
-
--- Clean up session tracking periodically
-CreateThread(function()
-    while true do
-        Wait(300000) -- Every 5 minutes
-        appliedMemoryThisSession = {}
-    end
-end)
-
------------------------------------------------------------
--- DYNAMIC MARKER SYSTEM (v2.1.1+)
--- Distance-based opacity for premium marker experience
------------------------------------------------------------
-CreateThread(function()
-    while true do
-        local cfg = Config.DynamicMarkers
-        if not cfg or not cfg.enabled then
-            Wait(5000) -- Check periodically if enabled
-            goto continue
-        end
-
-        local playerPed = PlayerPedId()
-        local playerCoords = GetEntityCoords(playerPed)
-        local sleep = 500 -- Default sleep when no markers nearby
-
-        for _, zone in ipairs(Config.ModificationZones) do
-            local distance = #(playerCoords - zone.coords)
-
-            -- Only draw if within fade start distance
-            if distance <= cfg.fadeStartDistance then
-                sleep = 0 -- Need to draw every frame
-
-                -- Calculate opacity based on distance
-                local alpha = 0
-                if distance <= cfg.fadeEndDistance then
-                    alpha = 255 -- Full opacity
-                else
-                    -- Linear interpolation between fadeEnd and fadeStart
-                    local fadeRange = cfg.fadeStartDistance - cfg.fadeEndDistance
-                    local fadeProgress = (cfg.fadeStartDistance - distance) / fadeRange
-                    alpha = math.floor(fadeProgress * 255)
-                end
-
-                -- Get zone-specific color
-                local colors = cfg.colors[zone.type] or cfg.colors.default
-                local r, g, b, baseAlpha = colors[1], colors[2], colors[3], colors[4]
-
-                -- Apply calculated alpha (scaled by base alpha)
-                local finalAlpha = math.floor((alpha / 255) * (baseAlpha or 200))
-
-                -- Draw the marker
-                DrawMarker(
-                    cfg.markerType,
-                    zone.coords.x, zone.coords.y, zone.coords.z - 0.5,
-                    0.0, 0.0, 0.0,
-                    0.0, 0.0, 0.0,
-                    cfg.size.x, cfg.size.y, cfg.size.z,
-                    r, g, b, finalAlpha,
-                    cfg.bobUpDown, false, 2, cfg.rotate, nil, nil, false
-                )
-            end
-        end
-
-        Wait(sleep)
-        ::continue::
-    end
-end)
-
------------------------------------------------------------
--- LIVERY LABEL SYSTEM (v2.1.1+)
--- Get human-readable livery names when available
------------------------------------------------------------
-local liveryLabelCache = {}
-
-function GetLiveryLabel(vehicle, liveryIndex)
-    local vehicleModel = GetEntityModel(vehicle)
-    local modelName = GetDisplayNameFromVehicleModel(vehicleModel):lower()
-    local cacheKey = modelName .. "_" .. liveryIndex
-
-    -- Check cache first
-    if liveryLabelCache[cacheKey] then
-        return liveryLabelCache[cacheKey]
-    end
-
-    -- Try to get livery name from game
-    -- Format: VEHICLE_MODEL_LIVERY_INDEX (e.g., POLICE_LIVERY_1)
-    local attempts = {
-        ("%s_LIVERY_%d"):format(modelName:upper(), liveryIndex),
-        ("%s_LIV%d"):format(modelName:upper(), liveryIndex),
-        ("LIVERY_%s_%d"):format(modelName:upper(), liveryIndex)
-    }
-
-    for _, labelKey in ipairs(attempts) do
-        local label = GetLabelText(labelKey)
-        if label and label ~= "NULL" and label ~= labelKey then
-            liveryLabelCache[cacheKey] = label
-            return label
-        end
-    end
-
-    -- Fallback: Check if this is a known emergency vehicle livery pattern
-    local emergencyPatterns = {
-        [0] = "Standard",
-        [1] = "LSPD",
-        [2] = "LSSD/BCSO",
-        [3] = "Highway Patrol",
-        [4] = "Unmarked",
-        [5] = "Slicktop",
-        [6] = "K9 Unit",
-        [7] = "Traffic",
-        [8] = "Supervisor"
-    }
-
-    -- Check if vehicle is emergency class
-    local vehicleClass = GetVehicleClass(vehicle)
-    if vehicleClass == 18 then -- Emergency vehicle class
-        local pattern = emergencyPatterns[liveryIndex]
-        if pattern then
-            liveryLabelCache[cacheKey] = pattern
-            return pattern
-        end
-    end
-
-    -- Final fallback
-    local fallback = "Livery " .. liveryIndex
-    liveryLabelCache[cacheKey] = fallback
-    return fallback
-end
-
--- Enhanced livery name for search functionality
-function GetEnhancedLiveryName(vehicle, liveryIndex)
-    local label = GetLiveryLabel(vehicle, liveryIndex)
-    -- Include index for search: "K9 Unit (6)" or "Livery 3"
-    if label:match("^Livery %d") then
-        return label
-    else
-        return ("%s (#%d)"):format(label, liveryIndex)
-    end
-end
-
--- (Dead repair-payment and zone-defaults helpers removed 2026-08-28 — see
--- CHANGELOG 2.4.0. Repairs charge via the 'vehiclemods:server:chargeRepair' callback.)
-
-
--- ---------------------------------------------------------------------------
--- ox_target entry point. Preferred over a keybind: EVM only applies to the
--- vehicle you are standing at, inside a zone, so the interaction belongs on the
--- vehicle rather than on a function key competing with everything else.
--- ---------------------------------------------------------------------------
-local function RegisterEvmTarget()
-    exports.ox_target:addGlobalVehicle({
-        {
-            name     = 'dps_evm_modify',
-            icon     = 'fa-solid fa-screwdriver-wrench',
-            label    = 'Vehicle Modification',
-            distance = 3.0,
-            canInteract = function(entity)
-                if not entity or not DoesEntityExist(entity) then return false end
-                -- Only surface on emergency vehicles when the restriction is on,
-                -- so the option is not drawn on every civilian car in the world.
-                if Config.EmergencyVehiclesOnly and not Config.IsEmergencyVehicle(entity) then
-                    return false
-                end
-                return true
-            end,
-            -- Pass the TARGETED vehicle through; the handler no longer relies on
-            -- GetVehiclePedIsIn (which is 0 when standing beside the vehicle).
-            onSelect = function(data)
-                TriggerEvent('vehiclemods:client:openVehicleModMenu', data and data.entity)
-            end,
-        },
-    })
-end
-
--- Event-driven registration (no unbounded poll): register now if ox_target is
--- already up, otherwise when it starts. fxmanifest also declares the dependency.
-if GetResourceState('ox_target') == 'started' then
-    RegisterEvmTarget()
-end
-AddEventHandler('onClientResourceStart', function(res)
-    if res == 'ox_target' then RegisterEvmTarget() end
+AddEventHandler('onResourceStop', function(res)
+    if res == GetCurrentResourceName() then SetNuiFocus(false, false) end
 end)
