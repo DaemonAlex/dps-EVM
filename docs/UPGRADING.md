@@ -66,3 +66,9 @@ already type still work.
   `Config.AutoJobs = false` and fill in `Config.JobMappings` (Workshop) and/or
   `Config.TrunkGear.AutoJobs = false` + `Authorizedjobs` (trunk gear) the way
   you had them before.
+
+## Saved workshop rows from EVM 2.4
+
+dps-fleet keys every workshop row (`vehicle_mods`, `vehicle_presets`, `player_livery_memory`, `custom_liveries`) by the vehicle's **spawn code**. EVM 2.4 keyed them by the in-game display name. For vanilla vehicles the two are the same word; for add-on vehicles whose display name differs (for example a display name of `JET` or `avro rj70`), the old rows are not matched and the player simply picks the livery or preset again once. No migration runs; nothing is deleted.
+
+Custom livery texture dictionaries follow the same rule: name them `<spawncode>_<file>` (the `Config.CustomLiveries` key is the spawn code).
