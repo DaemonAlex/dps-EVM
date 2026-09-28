@@ -643,7 +643,10 @@ end
 
 -- LVC reads position 1 as the airhorn and positions 2..n as the siren cycle, so a
 -- list is at most 8 long (LVC's own menu pages 8 tones) and slot 1 is the horn.
+-- The airhorn alone is not a siren, hence a floor of two: Workshop.validTones
+-- enforces both, so the server gate refuses a one-tone list, not just the panel.
 Workshop.SIREN_SLOT_MAX = 8
+Workshop.SIREN_SLOT_MIN = 2
 
 -- Starting points, one per installed siren pack, horn first. leo/fire/ems are the
 -- three sets already live in lvc/SIRENS.lua's SIREN_ASSIGNMENTS on 2026-09-27.
@@ -675,8 +678,10 @@ function Workshop.sirenKey(gameName, model)
     return name:sub(1, 11)
 end
 
----A tone list LVC can use: a plain 1..n array, 1 to Workshop.SIREN_SLOT_MAX long,
----every entry a whole number in 1..maxId. Position 1 is the airhorn slot.
+---A tone list LVC can use: a plain 1..n array, Workshop.SIREN_SLOT_MIN to
+---Workshop.SIREN_SLOT_MAX long, every entry a whole number in 1..maxId.
+---Position 1 is the airhorn slot, so the floor of two is the horn plus one
+---cycle tone.
 ---@param list any
 ---@param maxId number|nil defaults to the transcribed tone count
 ---@return boolean
@@ -684,7 +689,7 @@ function Workshop.validTones(list, maxId)
     if type(list) ~= 'table' then return false end
     maxId = tonumber(maxId) or #Workshop.SIREN_TONES
     local n = #list
-    if n < 1 or n > Workshop.SIREN_SLOT_MAX then return false end
+    if n < Workshop.SIREN_SLOT_MIN or n > Workshop.SIREN_SLOT_MAX then return false end
     local keys = 0
     for _ in pairs(list) do keys = keys + 1 end
     if keys ~= n then return false end -- a hole or a named key: not a list

@@ -72,7 +72,11 @@ eq('string column is complete', #Workshop.SIREN_TONES_STRING, #Workshop.SIREN_TO
 eq('soundset column is complete', #Workshop.SIREN_TONES_REF, #Workshop.SIREN_TONES)
 
 eq('valid tones', Workshop.validTones({ 19, 20, 21, 22, 23 }, 46), true)
+eq('two is the floor', Workshop.validTones({ 19, 20 }, 46), true)
 eq('empty refused', Workshop.validTones({}, 46), false)
+-- LVC reads position 1 as the airhorn and 2.. as the cycle, so a lone tone is not a
+-- siren. The server gate refuses it, not just the panel.
+eq('single tone refused', Workshop.validTones({ 1 }, 46), false)
 eq('out of range refused', Workshop.validTones({ 1, 99 }, 46), false)
 eq('zero refused', Workshop.validTones({ 0, 1 }, 46), false)
 eq('non-integer refused', Workshop.validTones({ 1, 2.5 }, 46), false)

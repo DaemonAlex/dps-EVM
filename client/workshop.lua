@@ -444,8 +444,6 @@ end)
 local SIREN_CACHE = {}
 -- model (lowercase) -> vehicles.meta game name, from the server's open payload.
 local SIREN_GAMES = {}
--- LVC reads position 1 as the airhorn and 2.. as the cycle, so never fewer than two.
-local SIREN_SLOT_MIN = 2
 local sirenTestSound = nil
 
 ---LVC's hook and anything else client-side reads the assignments here.
@@ -577,9 +575,14 @@ local function playTone(veh, id)
     sirenTestSound = soundId
     PlaySoundFromEntity(soundId, audio, veh, Workshop.SIREN_TONES_REF[id] or 0, false, 0)
     SetTimeout(2000, function()
+        -- Only if this sound is still the live one. A second press inside the window
+        -- already released this id, and the engine may have re-issued it to that
+        -- press's sound — stopping it here would kill the new tone and release an id
+        -- twice.
+        if sirenTestSound ~= soundId then return end
+        sirenTestSound = nil
         StopSound(soundId)
         ReleaseSoundId(soundId)
-        if sirenTestSound == soundId then sirenTestSound = nil end
     end)
     return true
 end
@@ -609,7 +612,7 @@ local function sheetSirens(veh)
     options[#options + 1] = { key = 'add_slot', label = 'Add a tone', kind = 'action',
         value = #state.tones < Workshop.SIREN_SLOT_MAX }
     options[#options + 1] = { key = 'remove_slot', label = 'Remove the last tone', kind = 'action',
-        value = #state.tones > SIREN_SLOT_MIN }
+        value = #state.tones > Workshop.SIREN_SLOT_MIN }
     return options
 end
 
@@ -1224,7 +1227,7 @@ function APPLY.sirens(veh, key, value)
 
     if key == 'remove_slot' then
         local list = state.tones
-        if #list <= SIREN_SLOT_MIN then return false, 'A siren keeps the airhorn and at least one tone.' end
+        if #list <= Workshop.SIREN_SLOT_MIN then return false, 'A siren keeps the airhorn and at least one tone.' end
         list[#list] = nil
         return save(list, 'Last tone removed.')
     end
