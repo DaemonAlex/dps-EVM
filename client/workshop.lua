@@ -1342,6 +1342,14 @@ function WorkshopClient.apply(veh, sectionId, key, value)
     if type(sectionId) ~= 'string' or type(key) ~= 'string' then return false, 'Nothing to apply.' end
     local fn = APPLY[sectionId]
     if not fn then return false, 'That section cannot be changed here.' end
+    -- A vehicle we stand next to belongs to whoever spawned or last drove it; a mod
+    -- applied without control never leaves this client. Bounded wait, no thread.
+    if not NetworkHasControlOfEntity(veh) then
+        NetworkRequestControlOfEntity(veh)
+        local deadline = GetGameTimer() + 600
+        while not NetworkHasControlOfEntity(veh) and GetGameTimer() < deadline do Wait(0) end
+        if not NetworkHasControlOfEntity(veh) then return false, 'Someone else is controlling that vehicle.' end
+    end
     -- Once per apply, before any SetVehicleMod.
     SetVehicleModKit(veh, 0)
     local ok, message = fn(veh, key, value)
