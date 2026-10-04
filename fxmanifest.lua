@@ -20,6 +20,6 @@ client_scripts { '@qbx_core/modules/playerdata.lua', 'client.lua', 'client/works
 server_scripts { '@oxmysql/lib/MySQL.lua', 'server.lua' }
 
 ui_page 'html/index.html'
-files { 'html/index.html', 'html/style.css', 'html/app.js' }
+files { 'html/index.html', 'html/style.css', 'html/dps-look.css', 'html/app.js' }
 
 dependencies { 'ox_lib', 'qbx_core', 'oxmysql', 'ox_target' }
