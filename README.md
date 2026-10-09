@@ -16,7 +16,7 @@ into one resource, one config, and one ace. If you ran either of those before,
 see [Upgrading from dps-EVM / dps-carmenu](#upgrading-from-dps-evm--dps-carmenu).
 
 ![dps-fleet panel](docs/fleet-panel.png)
-*(screenshot pending — drop Damon's capture in at `docs/fleet-panel.png`)*
+*(screenshot pending —  `docs/fleet-panel.png`)*
 
 ---
 
